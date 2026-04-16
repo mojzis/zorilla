@@ -11,7 +11,7 @@ use crate::report::Finding;
 use crate::suppress::Suppressions;
 
 pub mod registry;
-pub mod zr000_hello;
+pub mod zr001_conditional;
 
 pub use crate::report::Severity;
 

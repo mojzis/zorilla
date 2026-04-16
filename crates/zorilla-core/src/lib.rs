@@ -1,9 +1,9 @@
 //! `zorilla-core` — library crate that powers the `zorilla` CLI.
 //!
-//! Phase 2 surface: configuration loading, file discovery, tree-sitter
-//! parsing, a rule framework with a single temporary rule
-//! (`ZR000 hello-world`), and a text emitter that renders a grouped
-//! [`Report`].
+//! Phase 3 surface: configuration loading, file discovery, tree-sitter
+//! parsing, a rule framework with the first real rule
+//! (`ZR001 conditional-test-logic`), and a text emitter that renders a
+//! grouped [`Report`].
 
 pub mod ast;
 pub mod config;
@@ -96,8 +96,8 @@ fn lint_one_file(
 }
 
 /// Look up a rule name by its code. Used by the text emitter to render
-/// `ZR000 hello-world` style lines without forcing the `Report` type to
-/// hold a rule-name slice per finding.
+/// `ZR001 conditional-test-logic` style lines without forcing the
+/// `Report` type to hold a rule-name slice per finding.
 #[must_use]
 pub fn rule_name_for(code: &str) -> &'static str {
     rules::registry::all().iter().find(|r| r.code() == code).map_or("unknown", |r| r.name())
@@ -109,47 +109,53 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn lint_fires_zr000_on_test_functions_in_discovered_files() {
+    fn lint_fires_zr001_on_test_functions_with_conditionals() {
         let tmp = TempDir::new().unwrap();
         let tests = tmp.path().join("tests");
         std::fs::create_dir_all(&tests).unwrap();
+        // Test function with a conditional — should produce one finding.
         std::fs::write(
             tests.join("test_a.py"),
-            "def test_one():\n    pass\n\ndef test_two():\n    pass\n",
+            "def test_one():\n    if True:\n        assert True\n",
         )
         .unwrap();
-        std::fs::write(tests.join("test_b.py"), "def _helper():\n    pass\n").unwrap();
+        // Test function without conditionals — no finding.
+        std::fs::write(tests.join("test_b.py"), "def test_two():\n    assert True\n").unwrap();
 
         let config = Config::default();
         let report = lint(&[tmp.path()], &config).unwrap();
         assert_eq!(report.files_discovered, 2);
-        assert_eq!(report.findings.len(), 2);
-        assert!(report.findings.iter().all(|f| f.code == "ZR000"));
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].code, "ZR001");
+        assert!(report.findings[0].file.ends_with("test_a.py"));
     }
 
     #[test]
     fn rule_name_for_known_code_works() {
-        assert_eq!(rule_name_for("ZR000"), "hello-world");
+        assert_eq!(rule_name_for("ZR001"), "conditional-test-logic");
         assert_eq!(rule_name_for("ZRwhatever"), "unknown");
     }
 
     #[test]
     fn findings_are_sorted_by_file_then_line() {
-        // Multiple files, each with multiple test functions at different
-        // lines. After `lint()` we expect findings sorted by file path,
-        // then by line, then by column — regardless of how discovery /
-        // rayon happened to order them internally.
+        // Multiple files, each with conditional-bearing test functions at
+        // different lines. After `lint()` we expect findings sorted by
+        // file path, then by line, then by column — regardless of how
+        // discovery / rayon happened to order them internally.
         let tmp = TempDir::new().unwrap();
         let tests = tmp.path().join("tests");
         std::fs::create_dir_all(&tests).unwrap();
-        // Two test functions at lines 1 and 5.
+        // Two test functions with conditionals at offending-statement
+        // lines 2 and 6.
         std::fs::write(
             tests.join("test_b.py"),
-            "def test_b1():\n    pass\n\n\ndef test_b2():\n    pass\n",
+            "def test_b1():\n    if True:\n        pass\n\n\
+             def test_b2():\n    for i in (1,):\n        pass\n",
         )
         .unwrap();
-        // One test function.
-        std::fs::write(tests.join("test_a.py"), "def test_a():\n    pass\n").unwrap();
+        // One test function with a conditional on line 2.
+        std::fs::write(tests.join("test_a.py"), "def test_a():\n    if True:\n        pass\n")
+            .unwrap();
 
         let config = Config::default();
         let report = lint(&[tmp.path()], &config).unwrap();
@@ -161,9 +167,9 @@ mod tests {
         assert_eq!(
             keys,
             vec![
-                ("test_a.py".to_string(), 1),
-                ("test_b.py".to_string(), 1),
-                ("test_b.py".to_string(), 5),
+                ("test_a.py".to_string(), 2),
+                ("test_b.py".to_string(), 2),
+                ("test_b.py".to_string(), 6),
             ]
         );
     }

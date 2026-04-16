@@ -46,7 +46,7 @@ mod tests {
     #[test]
     fn empty_suppresses_nothing() {
         let s = Suppressions::empty();
-        assert!(!s.is_suppressed(1, "ZR000"));
+        assert!(!s.is_suppressed(1, "ZR001"));
         assert!(!s.is_suppressed(42, "ZR999"));
     }
 }

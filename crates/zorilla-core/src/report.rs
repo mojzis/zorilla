@@ -63,8 +63,8 @@ impl Report {
     /// Findings are grouped by file (stable, lexicographic file order),
     /// each file's findings are printed in source order
     /// (line-then-column), and the trailing summary line is always
-    /// emitted. Rule names (`"hello-world"` for `ZR000`) are looked up
-    /// via `rule_name`.
+    /// emitted. Rule names (`"conditional-test-logic"` for `ZR001`) are
+    /// looked up via `rule_name`.
     ///
     /// `base` is the user-supplied root path used to shorten file paths
     /// in the output — typically the argument to `check`. Pass an empty
@@ -116,7 +116,7 @@ mod tests {
 
     fn name_lookup(code: &str) -> &'static str {
         match code {
-            "ZR000" => "hello-world",
+            "ZR001" => "conditional-test-logic",
             _ => "unknown",
         }
     }
@@ -137,7 +137,7 @@ mod tests {
     fn findings_exit_one() {
         let report = Report {
             findings: vec![Finding {
-                code: "ZR000",
+                code: "ZR001",
                 message: "placeholder".into(),
                 file: PathBuf::from("x.py"),
                 line: 1,
@@ -159,24 +159,24 @@ mod tests {
         let report = Report {
             findings: vec![
                 Finding {
-                    code: "ZR000",
-                    message: "hello world (test function detected)".into(),
+                    code: "ZR001",
+                    message: "test function has conditional logic (if/for/while/try)".into(),
                     file: PathBuf::from("/tmp/root/tests/test_b.py"),
                     line: 3,
                     column: 1,
                     severity: Severity::Warning,
                 },
                 Finding {
-                    code: "ZR000",
-                    message: "hello world (test function detected)".into(),
+                    code: "ZR001",
+                    message: "test function has conditional logic (if/for/while/try)".into(),
                     file: PathBuf::from("/tmp/root/tests/test_a.py"),
                     line: 1,
                     column: 1,
                     severity: Severity::Warning,
                 },
                 Finding {
-                    code: "ZR000",
-                    message: "hello world (test function detected)".into(),
+                    code: "ZR001",
+                    message: "test function has conditional logic (if/for/while/try)".into(),
                     file: PathBuf::from("/tmp/root/tests/test_a.py"),
                     line: 5,
                     column: 1,
@@ -187,9 +187,9 @@ mod tests {
         };
         let out = report.render_text(Path::new("/tmp/root"), name_lookup);
         let expected = "\
-tests/test_a.py:1:1: ZR000 hello-world: hello world (test function detected)
-tests/test_a.py:5:1: ZR000 hello-world: hello world (test function detected)
-tests/test_b.py:3:1: ZR000 hello-world: hello world (test function detected)
+tests/test_a.py:1:1: ZR001 conditional-test-logic: test function has conditional logic (if/for/while/try)
+tests/test_a.py:5:1: ZR001 conditional-test-logic: test function has conditional logic (if/for/while/try)
+tests/test_b.py:3:1: ZR001 conditional-test-logic: test function has conditional logic (if/for/while/try)
 3 findings in 2 files discovered.
 ";
         assert_eq!(out, expected);
