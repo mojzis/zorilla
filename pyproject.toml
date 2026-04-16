@@ -1,0 +1,45 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "zorilla"
+description = "pytest test-smell linter (Rust, via maturin)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "mojzis", email = "mojzisek@gmail.com"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
+keywords = ["python", "pytest", "lint", "test-smells", "rust"]
+dynamic = ["version"]
+dependencies = []
+
+[project.urls]
+homepage = "https://github.com/mojzis/zorilla"
+repository = "https://github.com/mojzis/zorilla"
+documentation = "https://github.com/mojzis/zorilla#readme"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+]
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "crates/zorilla-cli/Cargo.toml"
+strip = true

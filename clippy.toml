@@ -1,0 +1,5 @@
+cognitive-complexity-threshold = 15
+avoid-breaking-exported-api = false
+allow-unwrap-in-tests = true
+too-many-arguments-threshold = 7
+type-complexity-threshold = 300
