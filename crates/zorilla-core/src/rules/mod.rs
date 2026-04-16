@@ -15,6 +15,8 @@ pub mod zr001_conditional;
 pub mod zr002_sleep;
 pub mod zr003_no_assertion;
 pub mod zr004_assertion_roulette;
+pub mod zr005_mystery_guest;
+pub mod zr006_patch_stack;
 pub mod zr007_empty_test;
 
 pub use crate::config::RuleConfig;

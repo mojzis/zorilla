@@ -11,9 +11,10 @@
 //!    [`crate::rules::Context::config`]. Rules read only from
 //!    [`RuleConfig`]; the raw TOML tables never reach them.
 //!
-//! Only rule-specific config shapes defined so far (Phase 1) live here:
-//! [`Zr003Config`] (assertion helpers) and [`Zr004Config`]
-//! (`max_asserts`). Phases 2+ add more.
+//! Rule-specific config shapes defined so far: [`Zr003Config`] (assertion
+//! helpers), [`Zr004Config`] (`max_asserts`), [`Zr005Config`]
+//! (`allowed_prefixes`), and [`Zr006Config`] (`max_patches`). Future
+//! phases add more.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -29,6 +30,9 @@ pub const DEFAULT_EXCLUDE: &[&str] = &["**/fixtures/**"];
 
 /// Default `ZR004.max_asserts` — anything strictly greater fires the rule.
 pub const DEFAULT_ZR004_MAX_ASSERTS: usize = 4;
+
+/// Default `ZR006.max_patches` — anything strictly greater fires the rule.
+pub const DEFAULT_ZR006_MAX_PATCHES: usize = 3;
 
 /// Built-in assertion-helper names for ZR003.
 ///
@@ -108,6 +112,10 @@ pub struct RuleConfig {
     pub zr003: Zr003Config,
     /// Knobs for ZR004.
     pub zr004: Zr004Config,
+    /// Knobs for ZR005.
+    pub zr005: Zr005Config,
+    /// Knobs for ZR006.
+    pub zr006: Zr006Config,
 }
 
 /// Typed knobs for `ZR003 no-assertion`.
@@ -140,6 +148,31 @@ impl Default for Zr004Config {
     }
 }
 
+/// Typed knobs for `ZR005 mystery-guest`.
+#[derive(Debug, Clone, Default)]
+pub struct Zr005Config {
+    /// String-literal prefixes that are *not* flagged as mystery guests.
+    ///
+    /// If a literal would otherwise fire (absolute path / URL / home path)
+    /// but starts with any of these prefixes, the finding is suppressed.
+    /// Matching is plain `str::starts_with` — no globbing.
+    pub allowed_prefixes: Vec<String>,
+}
+
+/// Typed knobs for `ZR006 patch-stack`.
+#[derive(Debug, Clone)]
+pub struct Zr006Config {
+    /// Maximum number of stacked `@patch` decorators allowed per test.
+    /// The rule fires when `patch_count > max_patches`.
+    pub max_patches: usize,
+}
+
+impl Default for Zr006Config {
+    fn default() -> Self {
+        Self { max_patches: DEFAULT_ZR006_MAX_PATCHES }
+    }
+}
+
 /// Raw `[tool.zorilla]` section as it appears in TOML.
 #[derive(Debug, Default, Deserialize, Clone)]
 struct RawConfig {
@@ -163,9 +196,9 @@ struct RawRules {
     #[serde(default, rename = "ZR004")]
     zr004: RawZr004,
     #[serde(default, rename = "ZR005")]
-    zr005: RawRuleCommon,
+    zr005: RawZr005,
     #[serde(default, rename = "ZR006")]
-    zr006: RawRuleCommon,
+    zr006: RawZr006,
     #[serde(default, rename = "ZR007")]
     zr007: RawRuleCommon,
 }
@@ -190,6 +223,22 @@ struct RawZr004 {
     enabled: Option<bool>,
     #[serde(default)]
     max_asserts: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+struct RawZr005 {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    allowed_prefixes: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+struct RawZr006 {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    max_patches: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -312,7 +361,17 @@ impl Config {
 
         let max_asserts = self.rules.zr004.max_asserts.unwrap_or(DEFAULT_ZR004_MAX_ASSERTS);
 
-        RuleConfig { disabled, zr003: Zr003Config { helpers }, zr004: Zr004Config { max_asserts } }
+        let allowed_prefixes = self.rules.zr005.allowed_prefixes.clone().unwrap_or_default();
+
+        let max_patches = self.rules.zr006.max_patches.unwrap_or(DEFAULT_ZR006_MAX_PATCHES);
+
+        RuleConfig {
+            disabled,
+            zr003: Zr003Config { helpers },
+            zr004: Zr004Config { max_asserts },
+            zr005: Zr005Config { allowed_prefixes },
+            zr006: Zr006Config { max_patches },
+        }
     }
 }
 
@@ -443,6 +502,43 @@ mod tests {
             .unwrap();
         let cfg = Config::discover(tmp.path()).unwrap();
         assert!(cfg.rule_config().disabled.contains("ZR003"));
+    }
+
+    #[test]
+    fn rule_config_reads_zr005_allowed_prefixes() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("zorilla.toml"),
+            "[rules.ZR005]\nallowed_prefixes = [\"http://localhost\", \"/tmp/\"]\n",
+        )
+        .unwrap();
+        let cfg = Config::discover(tmp.path()).unwrap();
+        let rc = cfg.rule_config();
+        assert_eq!(
+            rc.zr005.allowed_prefixes,
+            vec!["http://localhost".to_string(), "/tmp/".to_string()]
+        );
+    }
+
+    #[test]
+    fn rule_config_defaults_zr005_allowed_prefixes_empty() {
+        let rc = Config::default().rule_config();
+        assert!(rc.zr005.allowed_prefixes.is_empty());
+    }
+
+    #[test]
+    fn rule_config_reads_zr006_max_patches() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("zorilla.toml"), "[rules.ZR006]\nmax_patches = 5\n")
+            .unwrap();
+        let cfg = Config::discover(tmp.path()).unwrap();
+        assert_eq!(cfg.rule_config().zr006.max_patches, 5);
+    }
+
+    #[test]
+    fn rule_config_defaults_zr006_max_patches() {
+        let rc = Config::default().rule_config();
+        assert_eq!(rc.zr006.max_patches, DEFAULT_ZR006_MAX_PATCHES);
     }
 
     #[test]
