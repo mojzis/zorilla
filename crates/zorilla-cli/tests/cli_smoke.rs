@@ -42,6 +42,45 @@ fn check_on_tree_with_plain_tests_reports_zero_findings_and_exits_zero() {
 }
 
 #[test]
+fn check_on_single_file_argument_renders_basename_not_empty_path() {
+    // Regression: `zorilla check /tmp/test_bug.py` used to emit
+    // `:2:5: ZR001 ...` because `file.strip_prefix(base)` returns an
+    // empty path when base == file. Now the path falls back to the
+    // basename.
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("test_single.py");
+    std::fs::write(&file, "def test_x():\n    if True:\n        pass\n").unwrap();
+
+    Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .code(1)
+        .stdout(contains("test_single.py:2:5: ZR001 "))
+        .stdout(contains("1 findings in 1 files discovered."));
+}
+
+#[test]
+fn check_on_explicit_non_test_prefixed_file_still_lints_it() {
+    // Regression: users should not have to name their one-off scripts
+    // `test_*.py` to lint them explicitly. The include globs apply to
+    // directory walks but are bypassed for explicit file arguments.
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("scratch.py");
+    std::fs::write(&file, "def test_x():\n    if True:\n        pass\n").unwrap();
+
+    Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .code(1)
+        .stdout(contains("scratch.py:2:5: ZR001 "))
+        .stdout(contains("1 findings in 1 files discovered."));
+}
+
+#[test]
 fn check_on_tree_with_conditional_test_emits_zr001_finding() {
     let tmp = TempDir::new().unwrap();
     let tests = tmp.path().join("tests");

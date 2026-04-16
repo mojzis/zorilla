@@ -34,6 +34,12 @@ maturin develop
 # Run the CLI directly from a workspace checkout
 cargo run -p zorilla-cli -- check path/to/tests
 
+# `check FILE` lints FILE directly, regardless of name (include globs
+# only apply to directory walks). `check DIR` walks DIR honoring the
+# configured `include` globs (default: `tests/**/*.py`, `**/test_*.py`,
+# `**/*_test.py`, `**/conftest.py`) and `exclude` globs (default:
+# `**/fixtures/**`).
+
 # Full review (fmt, clippy, tests, audit, deny)
 make review
 ```

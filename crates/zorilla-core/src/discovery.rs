@@ -53,7 +53,12 @@ pub fn discover<P: AsRef<Path>>(
         }
 
         if path.is_file() {
-            if matches(path, &include, &exclude) && seen.insert(path.to_path_buf()) {
+            // Explicit file arguments bypass the `include` globs — if the
+            // user named a file on the command line they almost certainly
+            // want it linted, even when its name doesn't match
+            // `test_*.py`. `exclude` still applies so users can skip
+            // generated files by path convention.
+            if !exclude.is_match(path) && seen.insert(path.to_path_buf()) {
                 out.push(path.to_path_buf());
             }
             continue;
@@ -145,6 +150,31 @@ mod tests {
         let cfg = Config::default();
         let files = discover(&[&file], &cfg).unwrap();
         assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn explicit_file_argument_bypasses_include_globs() {
+        // When the user names a file on the command line, we include it
+        // even if its name doesn't match the default `test_*.py` globs.
+        // Matches the behavior of ruff / rg / other path-explicit tools.
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("not_a_test.py");
+        touch(&file);
+
+        let cfg = Config::default();
+        let files = discover(&[&file], &cfg).unwrap();
+        assert_eq!(files, vec![file]);
+    }
+
+    #[test]
+    fn explicit_file_argument_still_honors_exclude() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("fixtures").join("test_excluded.py");
+        touch(&file);
+
+        let cfg = Config::default();
+        let files = discover(&[&file], &cfg).unwrap();
+        assert!(files.is_empty(), "exclude must still apply to explicit file paths");
     }
 
     #[test]

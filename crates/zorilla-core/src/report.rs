@@ -107,7 +107,18 @@ fn display_path(file: &Path, base: &Path) -> PathBuf {
     if base.as_os_str().is_empty() {
         return file.to_path_buf();
     }
-    file.strip_prefix(base).map_or_else(|_| file.to_path_buf(), Path::to_path_buf)
+    // `file.strip_prefix(base)` returns an empty path when `file == base`
+    // (the CLI passed a single file as the only argument). An empty
+    // display path renders as `":line:col: ..."` which is useless — fall
+    // back to the file's basename, or to the full `file` if there's no
+    // file name component (e.g. `/`).
+    match file.strip_prefix(base) {
+        Ok(rel) if rel.as_os_str().is_empty() => {
+            file.file_name().map_or_else(|| file.to_path_buf(), PathBuf::from)
+        }
+        Ok(rel) => rel.to_path_buf(),
+        Err(_) => file.to_path_buf(),
+    }
 }
 
 #[cfg(test)]
@@ -200,5 +211,29 @@ tests/test_b.py:3:1: ZR001 conditional-test-logic: test function has conditional
         let report = Report { findings: Vec::new(), files_discovered: 0 };
         let out = report.render_text(Path::new(""), name_lookup);
         assert_eq!(out, "0 findings in 0 files discovered.\n");
+    }
+
+    #[test]
+    fn text_output_when_base_equals_file_falls_back_to_basename() {
+        // Regression: when the CLI is invoked as `zorilla check
+        // /tmp/test_bug.py`, `base` and `file` point to the same path, so
+        // `strip_prefix` returns an empty path. Previously that rendered
+        // as `:2:5: ZR001 …`; it should render as `test_bug.py:2:5: …`.
+        let report = Report {
+            findings: vec![Finding {
+                code: "ZR001",
+                message: "test function has conditional logic (if/for/while/try)".into(),
+                file: PathBuf::from("/tmp/test_bug.py"),
+                line: 2,
+                column: 5,
+                severity: Severity::Warning,
+            }],
+            files_discovered: 1,
+        };
+        let out = report.render_text(Path::new("/tmp/test_bug.py"), name_lookup);
+        assert!(
+            out.starts_with("test_bug.py:2:5: "),
+            "expected leading 'test_bug.py:2:5:' in {out:?}"
+        );
     }
 }
