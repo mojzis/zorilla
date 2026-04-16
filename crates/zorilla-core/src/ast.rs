@@ -172,32 +172,87 @@ pub fn collect_asserts<'tree>(
 ) -> Vec<AssertHit<'tree>> {
     let mut out = Vec::new();
     let _ = walk_descendants::<()>(body, |node| {
-        match node.kind() {
-            "assert_statement" => {
-                let count = node.named_child_count();
-                if count <= 1 {
-                    out.push(AssertHit::BareAssert(node));
-                } else {
-                    out.push(AssertHit::MessageAssert(node));
-                }
-            }
-            "call" => {
-                if let Some(name) = call_final_name(node, source) {
-                    if helpers.contains(name) {
-                        out.push(AssertHit::HelperCall(node));
-                    }
-                }
-            }
-            "with_statement" => {
-                if with_statement_is_raises_or_warns(node, source) {
-                    out.push(AssertHit::RaisesContext(node));
-                }
-            }
-            _ => {}
+        if let Some(hit) = classify_assert_hit(node, source, Some(helpers)) {
+            out.push(hit);
         }
         ControlFlow::Continue(())
     });
     out
+}
+
+/// Fast path for ZR003: does `body` contain **any** assert-shaped
+/// construct? Returns `true` on the first hit and stops walking.
+///
+/// Semantically equivalent to `!collect_asserts(body, source,
+/// helpers).is_empty()` but avoids the `Vec` allocation and walks only
+/// as far as needed.
+#[must_use]
+pub fn has_any_assert(
+    body: Node<'_>,
+    source: &str,
+    helpers: &std::collections::HashSet<String>,
+) -> bool {
+    walk_descendants(body, |node| {
+        if classify_assert_hit(node, source, Some(helpers)).is_some() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .is_break()
+}
+
+/// Count every bare `assert_statement` under `body` and return the first
+/// one in source order, if any.
+///
+/// Used by ZR004, which cares only about the bare form — not helper
+/// calls and not `with pytest.raises(...)`. Avoids allocating a `Vec`
+/// and avoids constructing a throwaway helpers `HashSet`.
+#[must_use]
+pub fn count_bare_asserts_with_first<'tree>(
+    body: Node<'tree>,
+    source: &str,
+) -> (usize, Option<Node<'tree>>) {
+    let mut count = 0;
+    let mut first: Option<Node<'tree>> = None;
+    let _ = walk_descendants::<()>(body, |node| {
+        if let Some(AssertHit::BareAssert(n)) = classify_assert_hit(node, source, None) {
+            count += 1;
+            if first.is_none() {
+                first = Some(n);
+            }
+        }
+        ControlFlow::Continue(())
+    });
+    (count, first)
+}
+
+/// Classify a single node as an [`AssertHit`] variant, if it is one.
+///
+/// `helpers = None` disables `HelperCall` detection (the caller doesn't
+/// care about helper calls, e.g. ZR004).
+fn classify_assert_hit<'tree>(
+    node: Node<'tree>,
+    source: &str,
+    helpers: Option<&std::collections::HashSet<String>>,
+) -> Option<AssertHit<'tree>> {
+    match node.kind() {
+        "assert_statement" => {
+            if node.named_child_count() <= 1 {
+                Some(AssertHit::BareAssert(node))
+            } else {
+                Some(AssertHit::MessageAssert(node))
+            }
+        }
+        "call" => {
+            let helpers = helpers?;
+            let name = call_final_name(node, source)?;
+            helpers.contains(name).then_some(AssertHit::HelperCall(node))
+        }
+        "with_statement" => with_statement_is_raises_or_warns(node, source)
+            .then_some(AssertHit::RaisesContext(node)),
+        _ => None,
+    }
 }
 
 /// The final identifier of a `call` node's `function` expression.

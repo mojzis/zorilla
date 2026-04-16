@@ -25,7 +25,7 @@
 //!
 //! ## Examples
 //!
-//! Positive — five bare asserts at the default threshold of 4:
+//! Positive — five bare asserts, one over the default threshold of 4:
 //!
 //! ```python
 //! def test_many():
@@ -49,9 +49,7 @@
 //!     assert a.v == 5, "v"
 //! ```
 
-use tree_sitter::Node;
-
-use crate::ast::{collect_asserts, iter_test_functions, AssertHit};
+use crate::ast::{count_bare_asserts_with_first, iter_test_functions};
 use crate::report::{Finding, Severity};
 use crate::rules::{Context, Rule};
 
@@ -72,25 +70,15 @@ impl Rule for AssertionRouletteRule {
 
     fn check(&self, ctx: &Context<'_>, out: &mut Vec<Finding>) {
         let max_asserts = ctx.config.zr004.max_asserts;
-        // ZR004 doesn't care about helper calls, but `collect_asserts`
-        // needs a helpers set — pass an empty one so it never flags a
-        // HelperCall hit. We only read BareAssert anyway.
-        let helpers = std::collections::HashSet::new();
         for test_fn in iter_test_functions(ctx.tree, ctx.source) {
             let Some(body) = test_fn.child_by_field_name("body") else {
                 continue;
             };
-            let hits = collect_asserts(body, ctx.source, &helpers);
-            let bare: Vec<Node<'_>> = hits
-                .into_iter()
-                .filter_map(|h| match h {
-                    AssertHit::BareAssert(n) => Some(n),
-                    _ => None,
-                })
-                .collect();
-            let count = bare.len();
+            let (count, first) = count_bare_asserts_with_first(body, ctx.source);
             if count > max_asserts {
-                let first = bare[0];
+                // `count > max_asserts` with `max_asserts: usize` implies
+                // `count >= 1`, so `first` is guaranteed `Some`.
+                let Some(first) = first else { continue };
                 let start = first.start_position();
                 out.push(Finding {
                     code: self.code(),

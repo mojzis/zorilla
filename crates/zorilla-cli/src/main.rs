@@ -46,9 +46,17 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
 
 fn check(paths: Vec<PathBuf>) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("getting current directory")?;
-    let config = Config::discover(&cwd).context("loading configuration")?;
-
     let paths = if paths.is_empty() { vec![cwd] } else { paths };
+
+    // Discover config starting from the first target path so running
+    // `zorilla check /some/project/tests/` from a different cwd still
+    // picks up that project's `pyproject.toml` / `zorilla.toml`. Matches
+    // the behavior of ruff / black / mypy. Fall back to the path itself
+    // when it's a directory.
+    let first = &paths[0];
+    let search_start: &Path =
+        if first.is_file() { first.parent().unwrap_or(first.as_path()) } else { first.as_path() };
+    let config = Config::discover(search_start).context("loading configuration")?;
 
     let report = lint(&paths, &config).context("running lint")?;
     // Use the first user-supplied path as the base for display paths —

@@ -11,9 +11,12 @@
 //! - a call whose function's final identifier is a known assertion
 //!   helper (see `DEFAULT_ZR003_HELPERS` in [`crate::config`]) or an
 //!   entry in the user's `[tool.zorilla.rules.ZR003] extra_helpers`;
-//! - a `with pytest.raises(...)` / `with pytest.warns(...)` / analogous
-//!   context-manager form (any call whose function's final identifier
-//!   is `raises` or `warns`).
+//! - a `with <expr>.raises(...)` / `with <expr>.warns(...)` context
+//!   manager (matched by final identifier — so `pytest.raises(...)`,
+//!   `self.assertRaises(...)`, and any custom `foo.raises(...)` all
+//!   count). The final-identifier match is deliberately permissive: it
+//!   mirrors how assertion-helper matching works and keeps user-defined
+//!   exception testers from producing false positives.
 //!
 //! The walk descends into nested inline helpers — if the test calls a
 //! nested `def` that contains an assert, the test counts as asserting.
@@ -50,7 +53,7 @@
 //!         boom()
 //! ```
 
-use crate::ast::{collect_asserts, iter_test_functions};
+use crate::ast::{has_any_assert, iter_test_functions};
 use crate::report::{Finding, Severity};
 use crate::rules::{Context, Rule};
 
@@ -78,8 +81,7 @@ impl Rule for NoAssertionRule {
             let Some(body) = test_fn.child_by_field_name("body") else {
                 continue;
             };
-            let hits = collect_asserts(body, ctx.source, helpers);
-            if hits.is_empty() {
+            if !has_any_assert(body, ctx.source, helpers) {
                 let start = test_fn.start_position();
                 out.push(Finding {
                     code: self.code(),
@@ -175,6 +177,19 @@ import pytest
 def test_warns():
     with pytest.warns(DeprecationWarning):
         legacy()
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_custom_raises_context_manager() {
+        // Documented behavior: the `raises`/`warns` match is by final
+        // identifier, not by `pytest.` prefix. A user-defined
+        // `foo.raises(...)` context manager still suppresses ZR003.
+        let src = "\
+def test_custom():
+    with foo.raises(ValueError):
+        boom()
 ";
         assert!(run(src).is_empty());
     }

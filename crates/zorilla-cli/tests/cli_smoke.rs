@@ -82,6 +82,31 @@ fn check_on_explicit_non_test_prefixed_file_still_lints_it() {
 }
 
 #[test]
+fn check_discovers_config_from_target_path_not_cwd() {
+    // Regression for M1: running `zorilla check /some/other/project`
+    // should pick up that project's zorilla.toml, not walk upward from
+    // the current working directory. The project here disables ZR001,
+    // so the conditional-bearing test produces no finding.
+    let tmp = TempDir::new().unwrap();
+    let tests = tmp.path().join("tests");
+    std::fs::create_dir_all(&tests).unwrap();
+    std::fs::write(tests.join("test_a.py"), "def test_x():\n    if True:\n        assert True\n")
+        .unwrap();
+    std::fs::write(tmp.path().join("zorilla.toml"), "[rules.ZR001]\nenabled = false\n").unwrap();
+
+    // Invoke from an unrelated cwd (the binary's own target dir), with
+    // the project as an absolute arg — config discovery should start
+    // from the target, not the cwd.
+    Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg(tmp.path())
+        .assert()
+        .success()
+        .stdout(contains("0 findings in 1 files discovered."));
+}
+
+#[test]
 fn check_on_tree_with_conditional_test_emits_zr001_finding() {
     let tmp = TempDir::new().unwrap();
     let tests = tmp.path().join("tests");

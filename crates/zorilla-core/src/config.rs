@@ -303,8 +303,7 @@ impl Config {
             disabled.insert("ZR007");
         }
 
-        let mut helpers: HashSet<String> =
-            DEFAULT_ZR003_HELPERS.iter().map(|s| (*s).to_string()).collect();
+        let mut helpers = Zr003Config::default().helpers;
         if let Some(extra) = &self.rules.zr003.extra_helpers {
             for h in extra {
                 helpers.insert(h.clone());
@@ -420,6 +419,30 @@ mod tests {
             .unwrap();
         let cfg = Config::discover(tmp.path()).unwrap();
         assert_eq!(cfg.rule_config().zr004.max_asserts, 2);
+    }
+
+    #[test]
+    fn rule_config_toml_keys_are_case_sensitive_uppercase() {
+        // Contract: PLAN.md §Configuration specifies uppercase TOML keys
+        // (`[rules.ZR003]`). The serde `rename = "ZR003"` attribute makes
+        // matching case-sensitive, so `[rules.zr003]` is silently
+        // ignored. This test documents that behavior — change it
+        // deliberately if we ever start accepting both cases.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("zorilla.toml"), "[rules.zr003]\nenabled = false\n")
+            .unwrap();
+        let cfg = Config::discover(tmp.path()).unwrap();
+        let rc = cfg.rule_config();
+        assert!(
+            !rc.disabled.contains("ZR003"),
+            "lowercase key `zr003` must not disable ZR003; only `ZR003` does"
+        );
+
+        // Sanity: the uppercase form works.
+        std::fs::write(tmp.path().join("zorilla.toml"), "[rules.ZR003]\nenabled = false\n")
+            .unwrap();
+        let cfg = Config::discover(tmp.path()).unwrap();
+        assert!(cfg.rule_config().disabled.contains("ZR003"));
     }
 
     #[test]
