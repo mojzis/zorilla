@@ -26,6 +26,9 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets --all-features
 cargo test --workspace
 
 # Build and install locally for testing (maturin)
+# NOTE: maturin develop requires an activated Python venv. Either
+# `source .venv/bin/activate` first, or export `VIRTUAL_ENV=/path/to/venv`
+# — adding the venv's bin/ to PATH alone is not enough.
 maturin develop
 
 # Run the CLI directly from a workspace checkout

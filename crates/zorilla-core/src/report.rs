@@ -42,9 +42,10 @@ impl Report {
         format!("{} findings in {} files discovered.", self.findings.len(), self.files_discovered)
     }
 
-    /// Process exit code: `0` clean, `1` findings, `2` error (set by caller).
-    pub fn exit_code(&self) -> i32 {
-        i32::from(!self.findings.is_empty())
+    /// Process exit code: `0` clean, `1` findings. `2` (error) is set by
+    /// the CLI when it can't produce a `Report` at all.
+    pub fn exit_code(&self) -> u8 {
+        u8::from(!self.findings.is_empty())
     }
 }
 

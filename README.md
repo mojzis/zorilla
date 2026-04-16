@@ -17,11 +17,15 @@ zorilla is distributed as a Python wheel built with
 ```bash
 # once published
 pip install zorilla
-# or, for a local checkout
+# or, for a local checkout (requires an activated venv)
 maturin develop
 ```
 
 This installs a `zorilla` binary on your `PATH`.
+
+> `maturin develop` needs an activated Python virtualenv — either
+> `source .venv/bin/activate` first, or export `VIRTUAL_ENV=/path/to/venv`.
+> Having the venv's `bin/` on `PATH` is not sufficient.
 
 ## Usage
 

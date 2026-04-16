@@ -53,5 +53,5 @@ fn check(paths: Vec<PathBuf>) -> anyhow::Result<ExitCode> {
 
     let report = lint(&paths, &config).context("running lint")?;
     println!("{}", report.summary_line());
-    Ok(ExitCode::from(u8::try_from(report.exit_code()).unwrap_or(2)))
+    Ok(ExitCode::from(report.exit_code()))
 }
