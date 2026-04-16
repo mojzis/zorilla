@@ -109,20 +109,34 @@ fn check_discovers_config_from_target_path_not_cwd() {
 #[test]
 fn check_on_file_with_ignore_file_directive_reports_zero_findings() {
     // End-to-end proof that `# zorilla: ignore-file` short-circuits the
-    // engine before any rule runs: a ZR001-firing test body in a file
-    // with the directive at the top must produce zero findings, exit 0.
-    let tmp = TempDir::new().unwrap();
-    let file = tmp.path().join("test_ignored.py");
-    std::fs::write(
-        &file,
-        "# zorilla: ignore-file\ndef test_x():\n    if True:\n        assert True\n",
-    )
-    .unwrap();
+    // engine before any rule runs. We pair the suppressed run with a
+    // control: the same body without the directive must fire ZR001 and
+    // exit non-zero. Without this paired control, a regression that
+    // accidentally always returns zero findings on single-file mode
+    // would still pass the suppression assertion.
+    let body = "def test_x():\n    if True:\n        assert True\n";
 
+    // Control: no directive — ZR001 fires, exit 1.
+    let control_dir = TempDir::new().unwrap();
+    let control_file = control_dir.path().join("test_control.py");
+    std::fs::write(&control_file, body).unwrap();
     Command::cargo_bin("zorilla")
         .unwrap()
         .arg("check")
-        .arg(&file)
+        .arg(&control_file)
+        .assert()
+        .code(1)
+        .stdout(contains("ZR001 conditional-test-logic"))
+        .stdout(contains("1 findings in 1 files discovered."));
+
+    // Suppressed: same body prefixed with the directive — zero findings, exit 0.
+    let suppressed_dir = TempDir::new().unwrap();
+    let suppressed_file = suppressed_dir.path().join("test_ignored.py");
+    std::fs::write(&suppressed_file, format!("# zorilla: ignore-file\n{body}")).unwrap();
+    Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg(&suppressed_file)
         .assert()
         .success()
         .stdout(contains("0 findings in 1 files discovered."));

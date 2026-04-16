@@ -164,6 +164,18 @@ fn parse_directive(directive: &str, file_level: &mut bool) -> Option<LineSuppres
     None
 }
 
+/// Insert `incoming` at `line`, merging with any existing entry via
+/// [`LineSuppression::merge`].
+///
+/// In practice a single [`Suppressions::from_source`] pass never produces
+/// two entries for the same line: Python's `#` runs to end-of-line and
+/// the parser locks onto the first `#` per source line, so the second
+/// directive in `# zorilla: ignore[ZR001]  # zorilla: ignore` is consumed
+/// inside the bracket scan. The merge branch therefore only fires when
+/// callers stitch together two `Suppressions` from independent parses,
+/// which the unit tests do explicitly to lock in the merge semantics.
+/// See `first_hash_wins_when_two_directives_share_a_line` and
+/// `merge_all_dominates_codes` in the test module.
 fn merge_into(
     per_line: &mut HashMap<usize, LineSuppression>,
     line: usize,
@@ -274,16 +286,18 @@ mod tests {
     }
 
     #[test]
-    fn merge_codes_with_all_on_same_line_yields_all() {
-        // Two directives on the same line: one bracketed, one bare. The
-        // bare `ignore` dominates.
+    fn first_hash_wins_when_two_directives_share_a_line() {
+        // Pins the documented parser limitation: `from_source` locks onto
+        // the FIRST `#` on each line and treats everything after it as one
+        // comment. So `# zorilla: ignore[ZR001]  # zorilla: ignore` is
+        // parsed as a bracketed directive for ZR001 only — the trailing
+        // bare `ignore` is consumed inside the bracket scan and silently
+        // discarded. ZR002 must therefore stay un-suppressed; if a future
+        // change starts honouring the second directive this test will
+        // catch it.
         let s = Suppressions::from_source("x = 1  # zorilla: ignore[ZR001]  # zorilla: ignore\n");
-        // Note: our parser only finds the FIRST `#`, so it sees the
-        // entire tail as one comment. The bare `ignore` after the bracket
-        // appears as part of `inside`. Document this by using two real
-        // lines instead for the merge case.
-        // (kept for documentation — the next test exercises true merge.)
         assert!(s.is_suppressed(1, "ZR001"));
+        assert!(!s.is_suppressed(1, "ZR002"));
     }
 
     #[test]
