@@ -40,9 +40,11 @@
 //! Negative — `if __name__ == "__main__":` at module scope is not inside
 //! any test function and is left alone.
 
-use tree_sitter::{Node, TreeCursor};
+use std::ops::ControlFlow;
 
-use crate::ast::iter_test_functions;
+use tree_sitter::Node;
+
+use crate::ast::{iter_test_functions, walk_descendants};
 use crate::report::{Finding, Severity};
 use crate::rules::{Context, Rule};
 
@@ -91,34 +93,20 @@ fn is_conditional_kind(kind: &str) -> bool {
 }
 
 /// Walk `body` depth-first (source order) and return the first node whose
-/// kind is one of the conditional kinds. Walks into nested
+/// kind is one of the conditional kinds. Descends into nested
 /// `function_definition` / `class_definition` children too — PLAN.md says
 /// "direct or nested".
 fn find_first_conditional(body: Node<'_>) -> Option<Node<'_>> {
-    let mut cursor = body.walk();
-    walk_for_conditional(&mut cursor, body)
-}
-
-fn walk_for_conditional<'tree>(
-    cursor: &mut TreeCursor<'tree>,
-    node: Node<'tree>,
-) -> Option<Node<'tree>> {
-    if is_conditional_kind(node.kind()) {
-        return Some(node);
-    }
-    if cursor.goto_first_child() {
-        loop {
-            let child = cursor.node();
-            if let Some(found) = walk_for_conditional(cursor, child) {
-                return Some(found);
-            }
-            if !cursor.goto_next_sibling() {
-                break;
-            }
+    match walk_descendants(body, |node| {
+        if is_conditional_kind(node.kind()) {
+            ControlFlow::Break(node)
+        } else {
+            ControlFlow::Continue(())
         }
-        cursor.goto_parent();
+    }) {
+        ControlFlow::Break(node) => Some(node),
+        ControlFlow::Continue(()) => None,
     }
-    None
 }
 
 #[cfg(test)]

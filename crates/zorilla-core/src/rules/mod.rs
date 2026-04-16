@@ -12,6 +12,8 @@ use crate::suppress::Suppressions;
 
 pub mod registry;
 pub mod zr001_conditional;
+pub mod zr002_sleep;
+pub mod zr007_empty_test;
 
 pub use crate::report::Severity;
 

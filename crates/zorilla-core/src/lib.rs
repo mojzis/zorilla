@@ -133,6 +133,8 @@ mod tests {
     #[test]
     fn rule_name_for_known_code_works() {
         assert_eq!(rule_name_for("ZR001"), "conditional-test-logic");
+        assert_eq!(rule_name_for("ZR002"), "sleep-in-test");
+        assert_eq!(rule_name_for("ZR007"), "empty-test");
         assert_eq!(rule_name_for("ZRwhatever"), "unknown");
     }
 

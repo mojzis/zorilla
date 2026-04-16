@@ -128,6 +128,8 @@ mod tests {
     fn name_lookup(code: &str) -> &'static str {
         match code {
             "ZR001" => "conditional-test-logic",
+            "ZR002" => "sleep-in-test",
+            "ZR007" => "empty-test",
             _ => "unknown",
         }
     }

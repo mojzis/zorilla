@@ -12,7 +12,46 @@
 //! [`iter_test_functions`] walks the tree and yields every
 //! `function_definition` node that passes [`is_test_function`].
 
+use std::ops::ControlFlow;
+
 use tree_sitter::{Node, Tree, TreeCursor};
+
+/// Visit every descendant of `root` in source order (pre-order DFS).
+///
+/// The visitor returns a [`ControlFlow`] — `Continue(())` keeps walking,
+/// `Break(value)` short-circuits and returns that value. This one helper
+/// replaces hand-written cursor loops inside every rule: "find the first
+/// X" becomes `Break(node)`, "collect all X" stays `Continue(())` and
+/// mutates a captured `Vec`.
+pub fn walk_descendants<'tree, B>(
+    root: Node<'tree>,
+    mut visit: impl FnMut(Node<'tree>) -> ControlFlow<B>,
+) -> ControlFlow<B> {
+    let mut cursor = root.walk();
+    recurse(&mut cursor, root, &mut visit)
+}
+
+fn recurse<'tree, B>(
+    cursor: &mut TreeCursor<'tree>,
+    node: Node<'tree>,
+    visit: &mut dyn FnMut(Node<'tree>) -> ControlFlow<B>,
+) -> ControlFlow<B> {
+    visit(node)?;
+    if cursor.goto_first_child() {
+        let result = (|| -> ControlFlow<B> {
+            loop {
+                let child = cursor.node();
+                recurse(cursor, child, visit)?;
+                if !cursor.goto_next_sibling() {
+                    return ControlFlow::Continue(());
+                }
+            }
+        })();
+        cursor.goto_parent();
+        result?;
+    }
+    ControlFlow::Continue(())
+}
 
 /// Return `true` when `node` is a tree-sitter Python function that
 /// qualifies as a pytest test function.
@@ -69,30 +108,13 @@ pub fn iter_test_functions<'tree>(
     source: &str,
 ) -> impl Iterator<Item = Node<'tree>> {
     let mut out = Vec::new();
-    let mut cursor = tree.walk();
-    collect_test_functions(&mut cursor, source, &mut out);
-    out.into_iter()
-}
-
-fn collect_test_functions<'tree>(
-    cursor: &mut TreeCursor<'tree>,
-    source: &str,
-    out: &mut Vec<Node<'tree>>,
-) {
-    let node = cursor.node();
-    if node.kind() == "function_definition" && is_test_function(node, source) {
-        out.push(node);
-    }
-
-    if cursor.goto_first_child() {
-        loop {
-            collect_test_functions(cursor, source, out);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
+    let _ = walk_descendants::<()>(tree.root_node(), |node| {
+        if node.kind() == "function_definition" && is_test_function(node, source) {
+            out.push(node);
         }
-        cursor.goto_parent();
-    }
+        ControlFlow::Continue(())
+    });
+    out.into_iter()
 }
 
 fn function_name<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
@@ -111,24 +133,13 @@ mod tests {
     use crate::parse::parse;
 
     fn all_function_defs(tree: &Tree) -> Vec<Node<'_>> {
-        fn walk<'a>(cursor: &mut TreeCursor<'a>, out: &mut Vec<Node<'a>>) {
-            let node = cursor.node();
+        let mut out = Vec::new();
+        let _ = walk_descendants::<()>(tree.root_node(), |node| {
             if node.kind() == "function_definition" {
                 out.push(node);
             }
-            if cursor.goto_first_child() {
-                loop {
-                    walk(cursor, out);
-                    if !cursor.goto_next_sibling() {
-                        break;
-                    }
-                }
-                cursor.goto_parent();
-            }
-        }
-        let mut out = Vec::new();
-        let mut cursor = tree.walk();
-        walk(&mut cursor, &mut out);
+            ControlFlow::Continue(())
+        });
         out
     }
 
