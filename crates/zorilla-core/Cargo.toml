@@ -1,0 +1,24 @@
+[package]
+name = "zorilla-core"
+version = "0.1.0"
+description = "Core library for zorilla — pytest test-smell linter"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
+ignore = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+globset = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+insta = { workspace = true }
+
+[lints]
+workspace = true
