@@ -1,15 +1,14 @@
 //! `zorilla` — thin clap wrapper over `zorilla-core`.
 //!
-//! Phase 1 ships only the `check` subcommand. It prints the Phase 1
-//! summary line (`"N findings in M files discovered."`) and uses exit
-//! codes `0` (clean), `1` (findings), `2` (error).
+//! Phase 2 ships the `check` subcommand with the grouped text emitter.
+//! Exit codes: `0` (clean), `1` (findings), `2` (error).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use zorilla_core::{lint, Config};
+use zorilla_core::{lint, rule_name_for, Config};
 
 #[derive(Debug, Parser)]
 #[command(name = "zorilla", about = "pytest test-smell linter", version)]
@@ -52,6 +51,11 @@ fn check(paths: Vec<PathBuf>) -> anyhow::Result<ExitCode> {
     let paths = if paths.is_empty() { vec![cwd] } else { paths };
 
     let report = lint(&paths, &config).context("running lint")?;
-    println!("{}", report.summary_line());
+    // Use the first user-supplied path as the base for display paths —
+    // matches `path_arg.join(relative_from_walker)` shape from context.md
+    // gotchas.
+    let base: &Path = paths.first().map_or_else(|| Path::new(""), PathBuf::as_path);
+    let text = report.render_text(base, rule_name_for);
+    print!("{text}");
     Ok(ExitCode::from(report.exit_code()))
 }

@@ -1,8 +1,9 @@
 //! End-to-end smoke test for the `zorilla` binary.
 //!
-//! Phase 1 shape: `zorilla check <dir>` must exit 0 on a clean tree and
-//! print the Phase 1 summary line. The test is deliberately minimal —
-//! later phases will add finding-level assertions once real rules land.
+//! Phase 2 shape: `zorilla check <dir>` runs the rule pipeline. On an
+//! empty tree it exits 0 and prints a zero-findings summary; on a tree
+//! with test functions it exits 1 and prints one `ZR000 hello-world`
+//! finding per test function plus the trailing summary line.
 
 use assert_cmd::Command;
 use predicates::str::contains;
@@ -22,7 +23,7 @@ fn check_on_empty_directory_reports_zero_findings_and_exits_zero() {
 }
 
 #[test]
-fn check_on_tree_with_test_files_counts_them() {
+fn check_on_tree_with_test_files_emits_hello_world_findings() {
     let tmp = TempDir::new().unwrap();
     let tests = tmp.path().join("tests");
     std::fs::create_dir_all(&tests).unwrap();
@@ -34,6 +35,10 @@ fn check_on_tree_with_test_files_counts_them() {
         .arg("check")
         .arg(tmp.path())
         .assert()
-        .success()
-        .stdout(contains("0 findings in 2 files discovered."));
+        .code(1)
+        .stdout(contains("ZR000 hello-world"))
+        .stdout(contains("hello world (test function detected)"))
+        .stdout(contains("tests/test_a.py:1:1:"))
+        .stdout(contains("tests/test_b.py:1:1:"))
+        .stdout(contains("2 findings in 2 files discovered."));
 }
