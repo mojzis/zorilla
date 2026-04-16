@@ -17,11 +17,11 @@ use std::path::Path;
 
 use rayon::prelude::*;
 
-pub use config::Config;
+pub use config::{Config, RuleConfig};
 pub use discovery::{discover, DiscoveryError};
 pub use parse::ParseError;
 pub use report::{Finding, Report, Severity};
-pub use rules::{Context, Rule, RuleConfig};
+pub use rules::{Context, Rule};
 pub use suppress::Suppressions;
 
 /// Error surfaced to callers of [`lint`].
@@ -48,11 +48,11 @@ pub fn lint<P: AsRef<Path>>(paths: &[P], config: &Config) -> Result<Report, Lint
     let files = discover(paths, config)?;
     let files_discovered = files.len();
 
-    let rule_config = RuleConfig;
+    let rule_config = config.rule_config();
     let registry = rules::registry::all();
 
     let mut findings: Vec<Finding> =
-        files.par_iter().flat_map(|file| lint_one_file(file, registry, rule_config)).collect();
+        files.par_iter().flat_map(|file| lint_one_file(file, registry, &rule_config)).collect();
     // `discover` returns files in OS-dependent directory-walk order, so
     // the rayon output — though order-preserving w.r.t. its input — is
     // not canonical. Sort here so every consumer of `Report.findings`
@@ -67,7 +67,7 @@ pub fn lint<P: AsRef<Path>>(paths: &[P], config: &Config) -> Result<Report, Lint
 fn lint_one_file(
     file: &Path,
     registry: &[&'static dyn Rule],
-    rule_config: RuleConfig,
+    rule_config: &RuleConfig,
 ) -> Vec<Finding> {
     let Ok(source) = std::fs::read_to_string(file) else {
         return Vec::new();
@@ -81,12 +81,15 @@ fn lint_one_file(
         file,
         source: &source,
         tree: &tree,
-        config: &rule_config,
+        config: rule_config,
         suppressions: &suppressions,
     };
 
     let mut out = Vec::new();
     for rule in registry {
+        if rule_config.disabled.contains(rule.code()) {
+            continue;
+        }
         if !rule.default_enabled() {
             continue;
         }
@@ -134,6 +137,8 @@ mod tests {
     fn rule_name_for_known_code_works() {
         assert_eq!(rule_name_for("ZR001"), "conditional-test-logic");
         assert_eq!(rule_name_for("ZR002"), "sleep-in-test");
+        assert_eq!(rule_name_for("ZR003"), "no-assertion");
+        assert_eq!(rule_name_for("ZR004"), "assertion-roulette");
         assert_eq!(rule_name_for("ZR007"), "empty-test");
         assert_eq!(rule_name_for("ZRwhatever"), "unknown");
     }
@@ -151,13 +156,16 @@ mod tests {
         // lines 2 and 6.
         std::fs::write(
             tests.join("test_b.py"),
-            "def test_b1():\n    if True:\n        pass\n\n\
-             def test_b2():\n    for i in (1,):\n        pass\n",
+            "def test_b1():\n    if True:\n        assert True\n\n\
+             def test_b2():\n    for i in (1,):\n        assert i\n",
         )
         .unwrap();
         // One test function with a conditional on line 2.
-        std::fs::write(tests.join("test_a.py"), "def test_a():\n    if True:\n        pass\n")
-            .unwrap();
+        std::fs::write(
+            tests.join("test_a.py"),
+            "def test_a():\n    if True:\n        assert True\n",
+        )
+        .unwrap();
 
         let config = Config::default();
         let report = lint(&[tmp.path()], &config).unwrap();

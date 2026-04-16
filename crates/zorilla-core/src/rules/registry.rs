@@ -6,10 +6,18 @@
 
 use super::zr001_conditional::ZR001_CONDITIONAL;
 use super::zr002_sleep::ZR002_SLEEP;
+use super::zr003_no_assertion::ZR003_NO_ASSERTION;
+use super::zr004_assertion_roulette::ZR004_ASSERTION_ROULETTE;
 use super::zr007_empty_test::ZR007_EMPTY_TEST;
 use super::Rule;
 
-static ALL_RULES: &[&dyn Rule] = &[&ZR001_CONDITIONAL, &ZR002_SLEEP, &ZR007_EMPTY_TEST];
+static ALL_RULES: &[&dyn Rule] = &[
+    &ZR001_CONDITIONAL,
+    &ZR002_SLEEP,
+    &ZR003_NO_ASSERTION,
+    &ZR004_ASSERTION_ROULETTE,
+    &ZR007_EMPTY_TEST,
+];
 
 /// Return every rule known to the engine, in ZR-code order.
 #[must_use]
@@ -24,6 +32,6 @@ mod tests {
     #[test]
     fn registry_contains_all_rules_in_code_order() {
         let codes: Vec<_> = all().iter().map(|r| r.code()).collect();
-        assert_eq!(codes, vec!["ZR001", "ZR002", "ZR007"]);
+        assert_eq!(codes, vec!["ZR001", "ZR002", "ZR003", "ZR004", "ZR007"]);
     }
 }

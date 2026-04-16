@@ -49,7 +49,8 @@ fn check_on_single_file_argument_renders_basename_not_empty_path() {
     // basename.
     let tmp = TempDir::new().unwrap();
     let file = tmp.path().join("test_single.py");
-    std::fs::write(&file, "def test_x():\n    if True:\n        pass\n").unwrap();
+    // Keep the body assertion-bearing so only ZR001 fires (not ZR003).
+    std::fs::write(&file, "def test_x():\n    if True:\n        assert True\n").unwrap();
 
     Command::cargo_bin("zorilla")
         .unwrap()
@@ -68,7 +69,7 @@ fn check_on_explicit_non_test_prefixed_file_still_lints_it() {
     // directory walks but are bypassed for explicit file arguments.
     let tmp = TempDir::new().unwrap();
     let file = tmp.path().join("scratch.py");
-    std::fs::write(&file, "def test_x():\n    if True:\n        pass\n").unwrap();
+    std::fs::write(&file, "def test_x():\n    if True:\n        assert True\n").unwrap();
 
     Command::cargo_bin("zorilla")
         .unwrap()

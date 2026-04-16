@@ -120,7 +120,7 @@ mod tests {
     fn run(src: &str) -> Vec<Finding> {
         let tree = parse(src).unwrap();
         let suppressions = Suppressions::empty();
-        let config = RuleConfig;
+        let config = RuleConfig::default();
         let ctx = Context {
             file: Path::new("example.py"),
             source: src,

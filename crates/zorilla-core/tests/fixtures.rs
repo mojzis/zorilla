@@ -50,7 +50,7 @@ fn run_single_rule(rule: &dyn Rule, path: &Path) -> Vec<Finding> {
     let source = std::fs::read_to_string(path).expect("fixture read");
     let tree = parse(&source).expect("fixture parse");
     let suppressions = Suppressions::empty();
-    let config = RuleConfig;
+    let config = RuleConfig::default();
     let ctx = Context {
         file: path,
         source: &source,

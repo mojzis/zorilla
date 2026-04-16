@@ -11,6 +11,12 @@
 //!
 //! [`iter_test_functions`] walks the tree and yields every
 //! `function_definition` node that passes [`is_test_function`].
+//!
+//! [`collect_asserts`] walks a test body and yields every assert-shaped
+//! construct (bare + message-carrying `assert_statement`s, calls to known
+//! assertion helpers, and `with pytest.raises/warns(...)` context
+//! managers). ZR003 and ZR004 share this walk to avoid duplicated descent
+//! logic.
 
 use std::ops::ControlFlow;
 
@@ -125,6 +131,123 @@ fn function_name<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
 fn class_name<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
     let name = node.child_by_field_name("name")?;
     name.utf8_text(source.as_bytes()).ok()
+}
+
+/// An assert-shaped construct found inside a test body.
+///
+/// ZR003 checks "is there any of these?" and ZR004 counts the bare form.
+/// Centralizing the walk here (rather than duplicating descent logic in
+/// each rule) keeps both rules consistent on edge cases like asserts
+/// nested inside inline helpers.
+#[derive(Debug, Clone, Copy)]
+pub enum AssertHit<'tree> {
+    /// A bare `assert x` statement: `assert_statement` with exactly one
+    /// named child.
+    BareAssert(Node<'tree>),
+    /// An `assert x, "msg"` statement: `assert_statement` with a second
+    /// named child (the message).
+    MessageAssert(Node<'tree>),
+    /// A call whose function's final identifier is in the caller-supplied
+    /// helper set (e.g. `self.assertEqual(...)`, `fail()`).
+    HelperCall(Node<'tree>),
+    /// A `with_statement` whose `with_item` value is a call to something
+    /// ending in `raises` or `warns` — `pytest.raises(...)`,
+    /// `pytest.warns(...)`, `self.assertRaises(...)` etc.
+    RaisesContext(Node<'tree>),
+}
+
+/// Walk `body` pre-order and collect every [`AssertHit`] found.
+///
+/// Descends into nested function/class definitions so asserts inside
+/// inline helpers count — matches the `walk_descendants` semantics ZR001
+/// and ZR002 already use.
+///
+/// `helpers` is the set of identifier names (the "final segment" of the
+/// call target) that should count as assertion helpers. Callers pass
+/// their merged (built-in + user-extra) set.
+pub fn collect_asserts<'tree>(
+    body: Node<'tree>,
+    source: &str,
+    helpers: &std::collections::HashSet<String>,
+) -> Vec<AssertHit<'tree>> {
+    let mut out = Vec::new();
+    let _ = walk_descendants::<()>(body, |node| {
+        match node.kind() {
+            "assert_statement" => {
+                let count = node.named_child_count();
+                if count <= 1 {
+                    out.push(AssertHit::BareAssert(node));
+                } else {
+                    out.push(AssertHit::MessageAssert(node));
+                }
+            }
+            "call" => {
+                if let Some(name) = call_final_name(node, source) {
+                    if helpers.contains(name) {
+                        out.push(AssertHit::HelperCall(node));
+                    }
+                }
+            }
+            "with_statement" => {
+                if with_statement_is_raises_or_warns(node, source) {
+                    out.push(AssertHit::RaisesContext(node));
+                }
+            }
+            _ => {}
+        }
+        ControlFlow::Continue(())
+    });
+    out
+}
+
+/// The final identifier of a `call` node's `function` expression.
+///
+/// Returns `Some("foo")` for `foo(...)`, `a.b.foo(...)`, `self.foo(...)`.
+/// Returns `None` for calls whose target is a more exotic expression
+/// (e.g. `(lambda: ...)(...)`, `f[0](...)`).
+pub fn call_final_name<'a>(call_node: Node<'_>, source: &'a str) -> Option<&'a str> {
+    let func = call_node.child_by_field_name("function")?;
+    match func.kind() {
+        "identifier" => func.utf8_text(source.as_bytes()).ok(),
+        "attribute" => {
+            let attr = func.child_by_field_name("attribute")?;
+            attr.utf8_text(source.as_bytes()).ok()
+        }
+        _ => None,
+    }
+}
+
+/// Does `with_node` carry a `with_item` whose value is a call whose
+/// function's final name is `raises` or `warns`?
+fn with_statement_is_raises_or_warns(with_node: Node<'_>, source: &str) -> bool {
+    // `with_statement` -> `with_clause` -> one or more `with_item`s.
+    // The value expression sits under `with_item` as either a named
+    // `value` field (newer grammar) or as the sole named child
+    // (depending on grammar version). Walk descendants to cover both.
+    let mut found = false;
+    let _ = walk_descendants::<()>(with_node, |n| {
+        if n.kind() == "with_item" {
+            // A with_item may contain a call (optionally wrapped in an
+            // `as` pattern). Look for a `call` descendant whose final
+            // name is `raises`/`warns`.
+            let _ = walk_descendants::<()>(n, |inner| {
+                if inner.kind() == "call" {
+                    if let Some(name) = call_final_name(inner, source) {
+                        if name == "raises" || name == "warns" {
+                            found = true;
+                            return ControlFlow::Break(());
+                        }
+                    }
+                }
+                ControlFlow::Continue(())
+            });
+            if found {
+                return ControlFlow::Break(());
+            }
+        }
+        ControlFlow::Continue(())
+    });
+    found
 }
 
 #[cfg(test)]

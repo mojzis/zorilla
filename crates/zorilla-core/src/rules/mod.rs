@@ -13,16 +13,12 @@ use crate::suppress::Suppressions;
 pub mod registry;
 pub mod zr001_conditional;
 pub mod zr002_sleep;
+pub mod zr003_no_assertion;
+pub mod zr004_assertion_roulette;
 pub mod zr007_empty_test;
 
+pub use crate::config::RuleConfig;
 pub use crate::report::Severity;
-
-/// Per-rule configuration carried via [`Context`].
-///
-/// Phase 2 stub: rules don't read any knobs yet. PLAN.md Step 4 onward
-/// introduces `[tool.zorilla.rules.ZR***]` tables that materialize here.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct RuleConfig;
 
 /// Everything a rule needs to inspect one file.
 ///
