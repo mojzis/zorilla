@@ -75,7 +75,10 @@ fn lint_one_file(
     let Ok(tree) = parse::parse(&source) else {
         return Vec::new();
     };
-    let suppressions = Suppressions::empty();
+    let suppressions = Suppressions::from_source(&source);
+    if suppressions.suppresses_file() {
+        return Vec::new();
+    }
 
     let ctx = Context {
         file,
@@ -95,6 +98,7 @@ fn lint_one_file(
         }
         rule.check(&ctx, &mut out);
     }
+    out.retain(|f| !suppressions.is_suppressed(f.line, f.code));
     out
 }
 
