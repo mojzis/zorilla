@@ -155,7 +155,9 @@ pub struct Zr005Config {
     ///
     /// If a literal would otherwise fire (absolute path / URL / home path)
     /// but starts with any of these prefixes, the finding is suppressed.
-    /// Matching is plain `str::starts_with` — no globbing.
+    /// Matching is plain `str::starts_with`, case-sensitive, no globbing.
+    /// Empty-string entries are stripped at load time (an empty prefix
+    /// would silence every literal — almost always a config typo).
     pub allowed_prefixes: Vec<String>,
 }
 
@@ -361,7 +363,17 @@ impl Config {
 
         let max_asserts = self.rules.zr004.max_asserts.unwrap_or(DEFAULT_ZR004_MAX_ASSERTS);
 
-        let allowed_prefixes = self.rules.zr005.allowed_prefixes.clone().unwrap_or_default();
+        // Drop empty entries: `""` would be a `starts_with("")` wildcard
+        // that silences every literal — almost certainly a config typo.
+        let allowed_prefixes: Vec<String> = self
+            .rules
+            .zr005
+            .allowed_prefixes
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .collect();
 
         let max_patches = self.rules.zr006.max_patches.unwrap_or(DEFAULT_ZR006_MAX_PATCHES);
 
@@ -524,6 +536,20 @@ mod tests {
     fn rule_config_defaults_zr005_allowed_prefixes_empty() {
         let rc = Config::default().rule_config();
         assert!(rc.zr005.allowed_prefixes.is_empty());
+    }
+
+    #[test]
+    fn rule_config_strips_empty_zr005_allowed_prefixes() {
+        // An empty-string entry would make `starts_with("")` true for
+        // every literal, silently disabling ZR005. Drop it at load time.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("zorilla.toml"),
+            "[rules.ZR005]\nallowed_prefixes = [\"\", \"/tmp/\", \"\"]\n",
+        )
+        .unwrap();
+        let cfg = Config::discover(tmp.path()).unwrap();
+        assert_eq!(cfg.rule_config().zr005.allowed_prefixes, vec!["/tmp/".to_string()]);
     }
 
     #[test]

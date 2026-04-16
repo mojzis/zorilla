@@ -70,6 +70,12 @@ use crate::ast::{iter_test_functions, walk_descendants};
 use crate::report::{Finding, Severity};
 use crate::rules::{Context, Rule};
 
+/// Maximum number of characters from the offending literal we paste into a
+/// finding message. A pathological test pasting a multi-kilobyte URL or
+/// path otherwise produces a multi-kilobyte finding that clobbers the
+/// terminal and any future JSON consumer.
+const MESSAGE_LITERAL_MAX: usize = 80;
+
 /// The registered ZR005 rule instance.
 pub static ZR005_MYSTERY_GUEST: MysteryGuestRule = MysteryGuestRule;
 
@@ -95,13 +101,16 @@ impl Rule for MysteryGuestRule {
                 if node.kind() == "string" && !is_assert_message(node) {
                     if let Some(literal) = string_content(node, ctx.source) {
                         if is_mystery_guest(literal)
-                            && !allowed.iter().any(|p| literal.starts_with(p.as_str()))
+                            && !allowed
+                                .iter()
+                                .any(|p| !p.is_empty() && literal.starts_with(p.as_str()))
                         {
                             let start = node.start_position();
+                            let display = truncate_for_message(literal, MESSAGE_LITERAL_MAX);
                             out.push(Finding {
                                 code: self.code(),
                                 message: format!(
-                                    "test contains hardcoded external resource: {literal:?}"
+                                    "test contains hardcoded external resource: {display:?}"
                                 ),
                                 file: ctx.file.to_path_buf(),
                                 line: start.row + 1,
@@ -203,8 +212,24 @@ fn is_windows_drive_path(literal: &str) -> bool {
 /// Is `string_node` the **message** argument of an `assert x, "msg"`
 /// statement? That is the string's immediate enclosing statement is an
 /// `assert_statement` and the string is its second named child.
+///
+/// Walks up through any `parenthesized_expression` wrappers first so that
+/// `assert exists(p), ("/etc/hosts should be there")` is treated the same
+/// as the unparenthesized form.
 fn is_assert_message(string_node: Node<'_>) -> bool {
-    let Some(parent) = string_node.parent() else {
+    // The literal we care about is the one nested inside the message slot.
+    // Climb out of any `parenthesized_expression` wrappers, tracking the
+    // outermost expression so we can identify it as the assert's second
+    // named child.
+    let mut current = string_node;
+    while let Some(parent) = current.parent() {
+        if parent.kind() == "parenthesized_expression" {
+            current = parent;
+        } else {
+            break;
+        }
+    }
+    let Some(parent) = current.parent() else {
         return false;
     };
     if parent.kind() != "assert_statement" {
@@ -214,7 +239,19 @@ fn is_assert_message(string_node: Node<'_>) -> bool {
     // index 1 = message (when present).
     let mut cursor = parent.walk();
     let named: Vec<Node<'_>> = parent.named_children(&mut cursor).collect();
-    named.get(1).is_some_and(|n| n.id() == string_node.id())
+    named.get(1).is_some_and(|n| n.id() == current.id())
+}
+
+/// Truncate `s` to at most `max` characters, appending `...` when we cut.
+/// Counts characters (not bytes) so multi-byte literals don't slice on a
+/// UTF-8 boundary.
+fn truncate_for_message(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push_str("...");
+    out
 }
 
 #[cfg(test)]
@@ -392,6 +429,55 @@ def test_ok():
     assert data
 ";
         assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_parenthesized_assert_message() {
+        // `assert cond, ("msg")` — the literal is still the failure
+        // message, even though the grammar wraps it in a
+        // `parenthesized_expression`.
+        let src = "\
+def test_msg():
+    assert exists(p), (\"/etc/hosts should be there\")
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn truncates_long_literal_in_message() {
+        // A pathological long literal should not produce a multi-kilobyte
+        // finding message.
+        let long_path = "/".to_string() + &"a".repeat(500);
+        let src = format!("def test_long():\n    open(\"{long_path}\")\n    assert True\n");
+        let out = run(&src);
+        assert_eq!(out.len(), 1);
+        // Message length stays bounded — the literal contribution is
+        // capped at MESSAGE_LITERAL_MAX (+ ellipsis + format prefix).
+        assert!(
+            out[0].message.len() < 200,
+            "ZR005 message should be bounded; got {} chars",
+            out[0].message.len()
+        );
+        assert!(out[0].message.contains("..."), "expected truncation marker in message");
+    }
+
+    #[test]
+    fn empty_allowed_prefix_does_not_silence_findings() {
+        // Regression guard: an empty-string prefix would trivially match
+        // every literal via `starts_with("")`. Config layer strips empty
+        // entries; here we verify the rule code is safe even if such an
+        // entry leaks through.
+        let src = "\
+def test_url():
+    r = get(\"https://api.example.com\")
+    assert r
+";
+        let mut cfg = Config::default().rule_config();
+        cfg.zr005.allowed_prefixes = vec![String::new()];
+        // The rule must NOT silence the finding just because the empty
+        // string is technically a prefix of every literal.
+        let out = run_with(src, &cfg);
+        assert_eq!(out.len(), 1, "empty prefix must not silence ZR005");
     }
 
     #[test]

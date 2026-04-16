@@ -18,8 +18,10 @@
 //! Threshold is **exclusive**: the default fires at 4 or more `@patch`
 //! decorators.
 //!
-//! **Reported location**: the first decorator's `start_position()`.
-//! That's the visual top of the stack and the most actionable target.
+//! **Reported location**: the first `@patch` decorator's
+//! `start_position()`. That's the visual top of the patch stack and the
+//! most actionable target — pointing at unrelated decorators like
+//! `@pytest.mark.foo` would mislead the reader.
 //!
 //! ## Examples
 //!
@@ -78,16 +80,19 @@ impl Rule for PatchStackRule {
             }
 
             let decorators = collect_decorators(parent);
-            let patch_count =
-                decorators.iter().filter(|d| decorator_is_patch(**d, ctx.source)).count();
+            let patches: Vec<Node<'_>> =
+                decorators.iter().copied().filter(|d| decorator_is_patch(*d, ctx.source)).collect();
+            let patch_count = patches.len();
 
             if patch_count > max_patches {
-                // At least one decorator exists (otherwise count == 0),
-                // so first_decorator is Some.
-                let Some(first) = decorators.first().copied() else {
+                // Point at the first @patch decorator specifically — not
+                // the first decorator overall — so the location matches
+                // the offense (e.g. `@pytest.mark.slow` above the patch
+                // stack must not be reported).
+                let Some(first_patch) = patches.first().copied() else {
                     continue;
                 };
-                let start = first.start_position();
+                let start = first_patch.start_position();
                 out.push(Finding {
                     code: self.code(),
                     message: format!(
@@ -329,6 +334,27 @@ def test_many():
 ";
         let out = run(src);
         assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn reports_location_of_first_patch_not_first_decorator() {
+        // `@pytest.mark.slow` precedes a four-deep `@patch` stack. The
+        // finding must point at the first `@patch`, not the mark — the
+        // mark is not part of the count and pointing at it would
+        // mislead the reader.
+        let src = "\
+@pytest.mark.slow
+@patch(\"a\")
+@patch(\"b\")
+@patch(\"c\")
+@patch(\"d\")
+def test_many(d, c, b, a):
+    assert True
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].line, 2, "should point at the first @patch decorator (line 2)");
+        assert_eq!(out[0].column, 1);
     }
 
     #[test]
