@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::Serialize;
 
@@ -72,6 +72,20 @@ pub fn compute_overview(report: &Report) -> OverviewReport {
     let files_with_findings = by_file.len();
     let total_findings = report.findings.len();
 
+    // `clean_files` = discovered − files-with-findings. `by_file`
+    // already carries the "has-findings" key set, so we use it for the
+    // membership test before consuming it into `files` below. This
+    // avoids a second pass over `report.findings` plus a throwaway
+    // `BTreeSet`. `report.discovered_files` is sorted ascending by
+    // `lint()` (see `zorilla_core::lint`), so the filtered output is
+    // already in the order we want — no explicit sort needed.
+    let clean_files: Vec<PathBuf> = report
+        .discovered_files
+        .iter()
+        .filter(|p| !by_file.contains_key(p.as_path()))
+        .cloned()
+        .collect();
+
     let mut files: Vec<FileOverview> = by_file
         .into_iter()
         .map(|(path, findings)| FileOverview { path, finding_count: findings.len(), findings })
@@ -80,18 +94,6 @@ pub fn compute_overview(report: &Report) -> OverviewReport {
     // key is path ascending. `sort_by` is stable on Rust's default
     // implementation; ties collapse to path order.
     files.sort_by(|a, b| b.finding_count.cmp(&a.finding_count).then(a.path.cmp(&b.path)));
-
-    // `clean_files` = discovered − files-with-findings. Use the already
-    // populated `discovered_files` so the CLI doesn't need to re-walk.
-    let findings_files: std::collections::BTreeSet<&Path> =
-        report.findings.iter().map(|f| f.file.as_path()).collect();
-    let mut clean_files: Vec<PathBuf> = report
-        .discovered_files
-        .iter()
-        .filter(|p| !findings_files.contains(p.as_path()))
-        .cloned()
-        .collect();
-    clean_files.sort();
 
     OverviewReport {
         summary: OverviewSummary {
@@ -138,38 +140,51 @@ pub fn format_overview_text(overview: &OverviewReport, use_color: bool) -> Strin
     // Column widths for the per-finding lines. Each file's findings are
     // aligned locally: position width = widest "line:col" in that file,
     // code column is fixed (5 chars, e.g. "ZR001"), name column widens
-    // to the file's widest rule name. These are cosmetic — tests assert
-    // substring presence, not exact whitespace.
+    // to the file's widest rule name.
+    //
+    // Precompute rows once — this resolves each finding's rule name
+    // (avoiding a second `rules::registry::find` pass per finding) and
+    // formats its `line:col` position string a single time. The width
+    // loop then runs over the prepared rows rather than re-walking the
+    // raw findings with fresh allocations.
     for file in &overview.files {
         out.push('\n');
         // File header: "path    N findings". Keep the two columns
-        // separated by at least two spaces — pure cosmetic.
+        // separated by at least two spaces — pure cosmetic. Pluralise
+        // "finding" when there is exactly one so the output reads as
+        // English.
         let path_str = file.path.display().to_string();
-        let _ = writeln!(out, "{}  {} findings", path_str, file.finding_count);
+        let _ = writeln!(
+            out,
+            "{}  {} {}",
+            path_str,
+            file.finding_count,
+            plural_findings(file.finding_count),
+        );
 
-        // Precompute widths for the finding rows so columns line up.
-        let pos_width = file
+        let rows: Vec<FindingRow<'_>> = file
             .findings
             .iter()
-            .map(|f| format!("{}:{}", f.line, f.column).len())
-            .max()
-            .unwrap_or(0);
-        let name_width = file
-            .findings
-            .iter()
-            .map(|f| rules::registry::find(f.code).map_or("unknown", Rule::name).len())
-            .max()
-            .unwrap_or(0);
+            .map(|f| FindingRow {
+                bullet: render_bullet(f.severity, use_color),
+                pos: format!("{}:{}", f.line, f.column),
+                code: f.code,
+                name: rules::registry::find(f.code).map_or("unknown", Rule::name),
+                message: &f.message,
+            })
+            .collect();
+        let pos_width = rows.iter().map(|r| r.pos.len()).max().unwrap_or(0);
+        let name_width = rows.iter().map(|r| r.name.len()).max().unwrap_or(0);
 
-        for finding in &file.findings {
-            let bullet = render_bullet(finding.severity, use_color);
-            let pos = format!("{}:{}", finding.line, finding.column);
-            let name = rules::registry::find(finding.code).map_or("unknown", Rule::name);
+        for row in &rows {
             let _ = writeln!(
                 out,
                 "  {bullet} {pos:<pos_width$}  {code} {name:<name_width$}  {message}",
-                code = finding.code,
-                message = finding.message,
+                bullet = row.bullet,
+                pos = row.pos,
+                code = row.code,
+                name = row.name,
+                message = row.message,
             );
         }
     }
@@ -180,6 +195,26 @@ pub fn format_overview_text(overview: &OverviewReport, use_color: bool) -> Strin
     }
 
     out
+}
+
+/// One finding's pre-resolved render fragments. Built once per file so
+/// the width pass and render pass share the same `line:col` string and
+/// rule-name lookup.
+struct FindingRow<'a> {
+    bullet: &'static str,
+    pos: String,
+    code: &'a str,
+    name: &'static str,
+    message: &'a str,
+}
+
+/// English pluralisation for "finding" — "1 finding" but "0/2/… findings".
+fn plural_findings(count: usize) -> &'static str {
+    if count == 1 {
+        "finding"
+    } else {
+        "findings"
+    }
 }
 
 /// Render [`OverviewReport`] as pretty-printed JSON with a trailing newline.
@@ -210,22 +245,24 @@ pub fn format_overview_json(overview: &OverviewReport) -> String {
     out
 }
 
-/// ANSI escape sequences for the bullet. Only used when `use_color =
-/// true` — see [`format_overview_text`].
-const ANSI_RESET: &str = "\x1b[0m";
-const ANSI_RED: &str = "\x1b[31m";
-const ANSI_YELLOW: &str = "\x1b[33m";
-const BULLET: char = '\u{25CF}';
+/// Rendered bullet strings. `BULLET_PLAIN` is the unstyled Unicode
+/// bullet; the colored variants wrap it with SGR codes (red 31,
+/// yellow 33, reset 0). Returning `&'static str` from
+/// [`render_bullet`] saves one allocation per finding in the text
+/// renderer, so the common `NO_COLOR` path emits zero bullet
+/// allocations.
+const BULLET_PLAIN: &str = "\u{25CF}";
+const BULLET_RED: &str = "\x1b[31m\u{25CF}\x1b[0m";
+const BULLET_YELLOW: &str = "\x1b[33m\u{25CF}\x1b[0m";
 
-fn render_bullet(severity: Severity, use_color: bool) -> String {
+fn render_bullet(severity: Severity, use_color: bool) -> &'static str {
     if !use_color {
-        return BULLET.to_string();
+        return BULLET_PLAIN;
     }
-    let color = match severity {
-        Severity::Error => ANSI_RED,
-        Severity::Warning => ANSI_YELLOW,
-    };
-    format!("{color}{BULLET}{ANSI_RESET}")
+    match severity {
+        Severity::Error => BULLET_RED,
+        Severity::Warning => BULLET_YELLOW,
+    }
 }
 
 /// Custom serializer for the `Vec<Finding>` field so we emit the shape
@@ -378,7 +415,13 @@ mod tests {
         // Path, finding_count, and the line:col + code + name + message
         // all show up.
         assert!(text.contains("tests/test_a.py"), "missing path in:\n{text}");
-        assert!(text.contains("1 findings"), "missing count-per-file in:\n{text}");
+        // Per-file header uses singular form when count == 1.
+        // Anchored on the full phrase so we don't match the header line
+        // ("Overview: 2 files, 1 findings in 1 files") incidentally.
+        assert!(
+            text.contains("tests/test_a.py  1 finding\n"),
+            "expected singular `1 finding` on per-file header, got:\n{text}",
+        );
         assert!(text.contains("12:5"), "missing line:column in:\n{text}");
         assert!(text.contains("ZR001"), "missing rule code in:\n{text}");
         assert!(text.contains("conditional-test-logic"), "missing rule name in:\n{text}");

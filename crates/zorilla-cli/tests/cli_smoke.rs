@@ -580,14 +580,18 @@ fn overview_on_tree_with_findings_prints_filename_findings_and_bullet() {
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     // Locate the file's header line — it must contain the filename and
-    // the word `findings`.
+    // the per-file finding-count fragment. Match on the singular form
+    // ("N finding" rather than "N findings") since the fixture has a
+    // single finding and the renderer pluralises based on count.
     let header = stdout
         .lines()
-        .find(|l| l.contains("test_a.py") && l.contains("findings"))
+        .find(|l| l.contains("test_a.py") && l.contains("finding"))
         .unwrap_or_else(|| panic!("missing file header in overview output:\n{stdout}"));
+    // Per-file header pluralises "finding" based on the count — one
+    // finding stays singular.
     assert!(
-        header.contains("1 findings"),
-        "expected '1 findings' on file header, got: {header:?}\nfull:\n{stdout}"
+        header.contains("1 finding") && !header.contains("1 findings"),
+        "expected singular '1 finding' on file header, got: {header:?}\nfull:\n{stdout}"
     );
     // Plain bullet (unicode ●) appears on at least one finding line.
     assert!(stdout.contains('\u{25CF}'), "missing bullet character in:\n{stdout}");

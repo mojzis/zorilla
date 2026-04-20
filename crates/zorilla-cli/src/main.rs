@@ -91,8 +91,8 @@ enum Format {
 }
 
 /// Output formats supported by aggregate-summary subcommands
-/// (`stats`, future `overview`). Deliberately separate from
-/// [`Format`] so SARIF cannot be routed into a summary by accident.
+/// (`stats`, `overview`). Deliberately separate from [`Format`] so
+/// SARIF cannot be routed into a summary by accident.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum SummaryFormat {
     Text,
