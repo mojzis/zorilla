@@ -51,6 +51,32 @@ pub trait Rule: Sync {
         true
     }
 
+    /// Long-form markdown documentation for this rule — the body shown
+    /// by `zorilla explain <code>`. Each rule embeds its own
+    /// `docs/rules/ZR00N.md` via `include_str!` so the binary stays
+    /// self-contained. No default — every rule must opt in so a new
+    /// rule cannot ship without documentation.
+    fn doc(&self) -> &'static str;
+
     /// Run the rule, pushing any findings onto `out`.
     fn check(&self, ctx: &Context<'_>, out: &mut Vec<Finding>);
+}
+
+#[cfg(test)]
+mod doc_test {
+    use super::registry::all;
+
+    #[test]
+    fn every_rule_has_nonempty_doc_starting_with_zr_heading() {
+        for rule in all() {
+            let doc = rule.doc();
+            assert!(!doc.is_empty(), "{} doc is empty", rule.code());
+            assert!(
+                doc.starts_with("# ZR"),
+                "{} doc must start with `# ZR` heading, got: {:?}",
+                rule.code(),
+                &doc[..doc.len().min(40)],
+            );
+        }
+    }
 }

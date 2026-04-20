@@ -3,12 +3,13 @@
 //! Phase 2 ships the `check` subcommand with the grouped text emitter.
 //! Exit codes: `0` (clean), `1` (findings), `2` (error).
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
-use zorilla_core::{lint, rule_name_for, Config};
+use zorilla_core::{lint, rule_name_for, rules, Config};
 
 #[derive(Debug, Parser)]
 #[command(name = "zorilla", about = "pytest test-smell linter", version)]
@@ -27,6 +28,13 @@ enum Command {
         /// Output format.
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
+    },
+    /// List all available rules.
+    ListRules,
+    /// Print the long-form documentation for a rule.
+    Explain {
+        /// Rule code, e.g. "ZR001" (case-insensitive).
+        code: String,
     },
 }
 
@@ -51,6 +59,8 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     match cli.command {
         Command::Check { paths, format } => check(paths, format),
+        Command::ListRules => Ok(list_rules()),
+        Command::Explain { code } => Ok(explain(&code)),
     }
 }
 
@@ -84,4 +94,35 @@ fn check(paths: Vec<PathBuf>, format: Format) -> anyhow::Result<ExitCode> {
     };
     print!("{rendered}");
     Ok(ExitCode::from(report.exit_code()))
+}
+
+/// Handle the `list-rules` subcommand — dump every registered rule in a
+/// padded text table. Column widths mirror the brief: CODE=6, NAME=26,
+/// DEFAULT=7. The table is built into a single `String` so we emit one
+/// `print!` call, matching the `check` handler's output shape.
+fn list_rules() -> ExitCode {
+    let mut out = String::new();
+    // Header; ignore write-to-String failures because `String` never errors.
+    let _ = writeln!(out, "{:<6}{:<26}{:<7}", "CODE", "NAME", "DEFAULT");
+    for rule in rules::registry::all() {
+        let default = if rule.default_enabled() { "on" } else { "off" };
+        let _ = writeln!(out, "{:<6}{:<26}{:<7}", rule.code(), rule.name(), default);
+    }
+    print!("{out}");
+    ExitCode::SUCCESS
+}
+
+/// Handle the `explain <code>` subcommand — print the embedded
+/// documentation for the named rule. Rule lookup is case-insensitive:
+/// the user can type either `ZR001` or `zr001`. Unknown codes exit with
+/// status 2 and an error message on stderr.
+fn explain(code: &str) -> ExitCode {
+    let upper = code.to_uppercase();
+    if let Some(rule) = rules::registry::all().iter().find(|r| r.code() == upper) {
+        print!("{}", rule.doc());
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("zorilla: unknown rule: {code}");
+        ExitCode::from(2)
+    }
 }

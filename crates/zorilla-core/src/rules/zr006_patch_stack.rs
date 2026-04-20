@@ -69,6 +69,10 @@ impl Rule for PatchStackRule {
         "patch-stack"
     }
 
+    fn doc(&self) -> &'static str {
+        include_str!("../../../../docs/rules/ZR006.md")
+    }
+
     fn check(&self, ctx: &Context<'_>, out: &mut Vec<Finding>) {
         let max_patches = ctx.config.zr006.max_patches;
         for test_fn in iter_test_functions(ctx.tree, ctx.source) {

@@ -65,6 +65,10 @@ impl Rule for SleepRule {
         "sleep-in-test"
     }
 
+    fn doc(&self) -> &'static str {
+        include_str!("../../../../docs/rules/ZR002.md")
+    }
+
     fn check(&self, ctx: &Context<'_>, out: &mut Vec<Finding>) {
         for test_fn in iter_test_functions(ctx.tree, ctx.source) {
             let Some(body) = test_fn.child_by_field_name("body") else {

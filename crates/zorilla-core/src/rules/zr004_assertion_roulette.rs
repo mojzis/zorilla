@@ -68,6 +68,10 @@ impl Rule for AssertionRouletteRule {
         "assertion-roulette"
     }
 
+    fn doc(&self) -> &'static str {
+        include_str!("../../../../docs/rules/ZR004.md")
+    }
+
     fn check(&self, ctx: &Context<'_>, out: &mut Vec<Finding>) {
         let max_asserts = ctx.config.zr004.max_asserts;
         for test_fn in iter_test_functions(ctx.tree, ctx.source) {

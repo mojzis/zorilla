@@ -75,6 +75,10 @@ impl Rule for NoAssertionRule {
         "no-assertion"
     }
 
+    fn doc(&self) -> &'static str {
+        include_str!("../../../../docs/rules/ZR003.md")
+    }
+
     fn check(&self, ctx: &Context<'_>, out: &mut Vec<Finding>) {
         let helpers = &ctx.config.zr003.helpers;
         for test_fn in iter_test_functions(ctx.tree, ctx.source) {

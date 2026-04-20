@@ -91,6 +91,10 @@ impl Rule for MysteryGuestRule {
         "mystery-guest"
     }
 
+    fn doc(&self) -> &'static str {
+        include_str!("../../../../docs/rules/ZR005.md")
+    }
+
     fn check(&self, ctx: &Context<'_>, out: &mut Vec<Finding>) {
         let allowed = &ctx.config.zr005.allowed_prefixes;
         for test_fn in iter_test_functions(ctx.tree, ctx.source) {

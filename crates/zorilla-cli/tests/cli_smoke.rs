@@ -201,6 +201,60 @@ fn check_format_sarif_emits_sarif_document() {
 }
 
 #[test]
+fn list_rules_lists_all_seven_rules() {
+    let assert = Command::cargo_bin("zorilla").unwrap().arg("list-rules").assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    for code in ["ZR001", "ZR002", "ZR003", "ZR004", "ZR005", "ZR006", "ZR007"] {
+        assert!(stdout.contains(code), "missing {code} in list-rules output:\n{stdout}");
+    }
+    for name in [
+        "conditional-test-logic",
+        "sleep-in-test",
+        "no-assertion",
+        "assertion-roulette",
+        "mystery-guest",
+        "patch-stack",
+        "empty-test",
+    ] {
+        assert!(stdout.contains(name), "missing {name} in list-rules output:\n{stdout}");
+    }
+    assert!(stdout.contains("CODE"), "missing CODE header in:\n{stdout}");
+    assert!(stdout.contains("DEFAULT"), "missing DEFAULT header in:\n{stdout}");
+}
+
+#[test]
+fn explain_zr001_prints_embedded_markdown() {
+    let assert =
+        Command::cargo_bin("zorilla").unwrap().arg("explain").arg("ZR001").assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("conditional"), "missing 'conditional' in:\n{stdout}");
+    assert!(stdout.contains("Positive example"), "missing 'Positive example' in:\n{stdout}");
+}
+
+#[test]
+fn explain_accepts_lowercase_rule_code() {
+    // Upper-case baseline.
+    let upper =
+        Command::cargo_bin("zorilla").unwrap().arg("explain").arg("ZR001").assert().success();
+    let upper_stdout = String::from_utf8(upper.get_output().stdout.clone()).unwrap();
+
+    // Lower-case must produce byte-identical output.
+    let lower =
+        Command::cargo_bin("zorilla").unwrap().arg("explain").arg("zr001").assert().success();
+    let lower_stdout = String::from_utf8(lower.get_output().stdout.clone()).unwrap();
+
+    assert_eq!(upper_stdout, lower_stdout);
+}
+
+#[test]
+fn explain_unknown_code_exits_two() {
+    let assert =
+        Command::cargo_bin("zorilla").unwrap().arg("explain").arg("BOGUS").assert().code(2);
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("unknown rule: BOGUS"), "missing error message in stderr:\n{stderr}");
+}
+
+#[test]
 fn check_on_tree_with_conditional_test_emits_zr001_finding() {
     let tmp = TempDir::new().unwrap();
     let tests = tmp.path().join("tests");
