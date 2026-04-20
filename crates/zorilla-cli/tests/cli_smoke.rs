@@ -143,6 +143,64 @@ fn check_on_file_with_ignore_file_directive_reports_zero_findings() {
 }
 
 #[test]
+fn check_format_json_emits_json_array_matching_findings() {
+    let tmp = TempDir::new().unwrap();
+    let tests = tmp.path().join("tests");
+    std::fs::create_dir_all(&tests).unwrap();
+    std::fs::write(tests.join("test_a.py"), "def test_x():\n    if True:\n        assert True\n")
+        .unwrap();
+
+    let assert = Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg("--format")
+        .arg("json")
+        .arg(tmp.path())
+        .assert()
+        .code(1);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    // JSON output must NOT include the text summary line.
+    assert!(
+        !stdout.contains("findings in"),
+        "JSON output should not include summary line, got: {stdout}"
+    );
+    let arr: Vec<serde_json::Value> =
+        serde_json::from_str(&stdout).expect("stdout parses as JSON array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["code"], "ZR001");
+    assert_eq!(arr[0]["severity"], "warning");
+}
+
+#[test]
+fn check_format_sarif_emits_sarif_document() {
+    let tmp = TempDir::new().unwrap();
+    let tests = tmp.path().join("tests");
+    std::fs::create_dir_all(&tests).unwrap();
+    std::fs::write(tests.join("test_a.py"), "def test_x():\n    if True:\n        assert True\n")
+        .unwrap();
+
+    let assert = Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg("--format")
+        .arg("sarif")
+        .arg(tmp.path())
+        .assert()
+        .code(1);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        !stdout.contains("findings in"),
+        "SARIF output should not include summary line, got: {stdout}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("stdout parses as JSON object");
+    assert!(v.get("$schema").is_some(), "missing $schema: {v}");
+    assert!(v.get("version").is_some(), "missing version: {v}");
+    assert!(v.get("runs").is_some(), "missing runs: {v}");
+    assert_eq!(v["version"], "2.1.0");
+    assert_eq!(v["runs"][0]["tool"]["driver"]["name"], "zorilla");
+}
+
+#[test]
 fn check_on_tree_with_conditional_test_emits_zr001_finding() {
     let tmp = TempDir::new().unwrap();
     let tests = tmp.path().join("tests");

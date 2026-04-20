@@ -143,6 +143,13 @@ fn collect_rule_dirs() -> Vec<(String, PathBuf)> {
         let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
+        // Only rule-scoped fixture dirs (`zrNNN`) and the suppression
+        // harness dir (`zr_suppress`) participate in the per-rule loop.
+        // Other dirs under `tests/fixtures/` — e.g. `sarif/` used by the
+        // emitter integration test — are skipped here.
+        if !name.to_ascii_lowercase().starts_with("zr") {
+            continue;
+        }
         out.push((name.to_ascii_uppercase(), p));
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));

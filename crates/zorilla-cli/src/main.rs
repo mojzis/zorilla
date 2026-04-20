@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use zorilla_core::{lint, rule_name_for, Config};
 
 #[derive(Debug, Parser)]
@@ -24,7 +24,17 @@ enum Command {
         /// Paths to check. Defaults to the current directory.
         #[arg(value_name = "PATH")]
         paths: Vec<PathBuf>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum Format {
+    Text,
+    Json,
+    Sarif,
 }
 
 fn main() -> ExitCode {
@@ -40,11 +50,11 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     match cli.command {
-        Command::Check { paths } => check(paths),
+        Command::Check { paths, format } => check(paths, format),
     }
 }
 
-fn check(paths: Vec<PathBuf>) -> anyhow::Result<ExitCode> {
+fn check(paths: Vec<PathBuf>, format: Format) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("getting current directory")?;
     let paths = if paths.is_empty() { vec![cwd] } else { paths };
 
@@ -63,7 +73,19 @@ fn check(paths: Vec<PathBuf>) -> anyhow::Result<ExitCode> {
     // matches `path_arg.join(relative_from_walker)` shape from context.md
     // gotchas.
     let base: &Path = paths.first().map_or_else(|| Path::new(""), PathBuf::as_path);
-    let text = report.render_text(base, rule_name_for);
-    print!("{text}");
+    match format {
+        Format::Text => {
+            let text = report.render_text(base, rule_name_for);
+            print!("{text}");
+        }
+        Format::Json => {
+            // JSON and SARIF skip the trailing summary line so consumers
+            // can feed stdout straight into parsers.
+            println!("{}", report.render_json(base));
+        }
+        Format::Sarif => {
+            println!("{}", report.render_sarif(base));
+        }
+    }
     Ok(ExitCode::from(report.exit_code()))
 }

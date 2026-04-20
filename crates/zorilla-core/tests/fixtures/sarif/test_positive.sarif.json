@@ -1,0 +1,37 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "zorilla",
+          "version": "0.1.0",
+          "informationUri": "https://github.com/mojzis/zorilla"
+        }
+      },
+      "results": [
+        {
+          "ruleId": "ZR001",
+          "level": "warning",
+          "message": {
+            "text": "test function has conditional logic (if/for/while/try)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "test_positive.py"
+                },
+                "region": {
+                  "startLine": 3,
+                  "startColumn": 5
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

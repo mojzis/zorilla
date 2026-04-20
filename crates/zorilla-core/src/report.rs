@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+
 /// Severity of a finding.
 ///
 /// Defaults to [`Severity::Warning`] to match PLAN.md §Core abstractions.
@@ -16,6 +18,17 @@ pub enum Severity {
     #[default]
     Warning,
     Error,
+}
+
+impl Severity {
+    /// Lowercase string representation used by JSON and SARIF emitters.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
 }
 
 /// A single lint finding.
@@ -101,6 +114,151 @@ impl Report {
         buf.push('\n');
         buf
     }
+
+    /// Render the findings as a JSON array.
+    ///
+    /// One object per finding, in the same order as
+    /// [`Report::render_text`] (sorted by file, then line, then column,
+    /// just like `Report.findings`). Paths are shortened relative to
+    /// `base` — the same shape text emits.
+    ///
+    /// No trailing summary line — callers that want the summary should
+    /// use `render_text`.
+    #[must_use]
+    pub fn render_json(&self, base: &Path) -> String {
+        let items: Vec<FindingJson<'_>> = self
+            .findings
+            .iter()
+            .map(|f| FindingJson {
+                code: f.code,
+                message: &f.message,
+                file: display_path(&f.file, base).display().to_string(),
+                line: f.line,
+                column: f.column,
+                severity: f.severity.as_str(),
+            })
+            .collect();
+        // `serde_json::to_string_pretty` over a `Vec<FindingJson>` cannot
+        // fail — all fields serialize infallibly.
+        serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Render the findings as a SARIF 2.1.0 log document.
+    ///
+    /// Paths are shortened relative to `base` — the same shape text
+    /// emits. No trailing summary line.
+    #[must_use]
+    pub fn render_sarif(&self, base: &Path) -> String {
+        let results: Vec<SarifResult<'_>> = self
+            .findings
+            .iter()
+            .map(|f| SarifResult {
+                rule_id: f.code,
+                level: f.severity.as_str(),
+                message: SarifMessage { text: &f.message },
+                locations: vec![SarifLocation {
+                    physical_location: SarifPhysicalLocation {
+                        artifact_location: SarifArtifactLocation {
+                            uri: display_path(&f.file, base).display().to_string(),
+                        },
+                        region: SarifRegion { start_line: f.line, start_column: f.column },
+                    },
+                }],
+            })
+            .collect();
+
+        let log = SarifLog {
+            schema: "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+            version: "2.1.0",
+            runs: vec![SarifRun {
+                tool: SarifTool {
+                    driver: SarifDriver {
+                        name: "zorilla",
+                        version: env!("CARGO_PKG_VERSION"),
+                        information_uri: "https://github.com/mojzis/zorilla",
+                    },
+                },
+                results,
+            }],
+        };
+        serde_json::to_string_pretty(&log).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
+#[derive(Serialize)]
+struct FindingJson<'a> {
+    code: &'a str,
+    message: &'a str,
+    file: String,
+    line: usize,
+    column: usize,
+    severity: &'a str,
+}
+
+#[derive(Serialize)]
+struct SarifLog<'a> {
+    #[serde(rename = "$schema")]
+    schema: &'a str,
+    version: &'a str,
+    runs: Vec<SarifRun<'a>>,
+}
+
+#[derive(Serialize)]
+struct SarifRun<'a> {
+    tool: SarifTool<'a>,
+    results: Vec<SarifResult<'a>>,
+}
+
+#[derive(Serialize)]
+struct SarifTool<'a> {
+    driver: SarifDriver<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifDriver<'a> {
+    name: &'a str,
+    version: &'a str,
+    information_uri: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifResult<'a> {
+    rule_id: &'a str,
+    level: &'a str,
+    message: SarifMessage<'a>,
+    locations: Vec<SarifLocation>,
+}
+
+#[derive(Serialize)]
+struct SarifMessage<'a> {
+    text: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifLocation {
+    physical_location: SarifPhysicalLocation,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifPhysicalLocation {
+    artifact_location: SarifArtifactLocation,
+    region: SarifRegion,
+}
+
+#[derive(Serialize)]
+struct SarifArtifactLocation {
+    uri: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifRegion {
+    start_line: usize,
+    start_column: usize,
 }
 
 fn display_path(file: &Path, base: &Path) -> PathBuf {
@@ -213,6 +371,96 @@ tests/test_b.py:3:1: ZR001 conditional-test-logic: test function has conditional
         let report = Report { findings: Vec::new(), files_discovered: 0 };
         let out = report.render_text(Path::new(""), name_lookup);
         assert_eq!(out, "0 findings in 0 files discovered.\n");
+    }
+
+    #[test]
+    fn json_output_has_one_object_per_finding_and_shares_text_paths() {
+        let report = Report {
+            findings: vec![
+                Finding {
+                    code: "ZR001",
+                    message: "test function has conditional logic".into(),
+                    file: PathBuf::from("/tmp/root/tests/test_a.py"),
+                    line: 3,
+                    column: 5,
+                    severity: Severity::Warning,
+                },
+                Finding {
+                    code: "ZR002",
+                    message: "sleep in test".into(),
+                    file: PathBuf::from("/tmp/root/tests/test_b.py"),
+                    line: 7,
+                    column: 9,
+                    severity: Severity::Warning,
+                },
+            ],
+            files_discovered: 2,
+        };
+        let json = report.render_json(Path::new("/tmp/root"));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["code"], "ZR001");
+        assert_eq!(arr[0]["file"], "tests/test_a.py");
+        assert_eq!(arr[0]["line"], 3);
+        assert_eq!(arr[0]["column"], 5);
+        assert_eq!(arr[0]["severity"], "warning");
+        assert_eq!(arr[1]["code"], "ZR002");
+        assert_eq!(arr[1]["file"], "tests/test_b.py");
+    }
+
+    #[test]
+    fn json_output_empty_is_empty_array() {
+        let report = Report { findings: Vec::new(), files_discovered: 0 };
+        let json = report.render_json(Path::new(""));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sarif_output_has_expected_shape() {
+        let report = Report {
+            findings: vec![Finding {
+                code: "ZR001",
+                message: "test function has conditional logic".into(),
+                file: PathBuf::from("/tmp/root/tests/test_a.py"),
+                line: 3,
+                column: 5,
+                severity: Severity::Warning,
+            }],
+            files_discovered: 1,
+        };
+        let sarif = report.render_sarif(Path::new("/tmp/root"));
+        let parsed: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+        assert_eq!(parsed["version"], "2.1.0");
+        assert_eq!(
+            parsed["$schema"],
+            "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
+        );
+        let runs = parsed["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["tool"]["driver"]["name"], "zorilla");
+        assert_eq!(
+            runs[0]["tool"]["driver"]["informationUri"],
+            "https://github.com/mojzis/zorilla"
+        );
+        let results = runs[0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["ruleId"], "ZR001");
+        assert_eq!(results[0]["level"], "warning");
+        assert_eq!(results[0]["message"]["text"], "test function has conditional logic");
+        let loc = &results[0]["locations"][0]["physicalLocation"];
+        assert_eq!(loc["artifactLocation"]["uri"], "tests/test_a.py");
+        assert_eq!(loc["region"]["startLine"], 3);
+        assert_eq!(loc["region"]["startColumn"], 5);
+    }
+
+    #[test]
+    fn sarif_output_empty_has_no_results() {
+        let report = Report { findings: Vec::new(), files_discovered: 0 };
+        let sarif = report.render_sarif(Path::new(""));
+        let parsed: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+        assert!(parsed["runs"][0]["results"].as_array().unwrap().is_empty());
     }
 
     #[test]
