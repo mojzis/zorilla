@@ -36,6 +36,8 @@ zorilla check path/to/tests
 
 Exit codes: `0` clean, `1` findings reported, `2` error.
 
+`--files PATH` (repeatable) and `--files-from FILE` (use `-` for stdin) accept explicit file lists, bypassing the configured include globs — useful for CI pipelines.
+
 ### Rules
 
 | Code   | Name                    | Summary                                                  |

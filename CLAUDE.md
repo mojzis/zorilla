@@ -2,43 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Overview
-
-zorilla is a fast, opinionated pytest test-smell linter written in Rust. It is a Cargo workspace of two crates (`zorilla-core` library, `zorilla-cli` binary) packaged as a Python wheel via maturin so users install it with `pip install zorilla` or `uv tool install zorilla` and get the `zorilla` command on PATH.
-
 ## Workspace Layout
 
-```
-crates/
-  zorilla-core/   # library: config, discovery, parsing, rules, reporting
-  zorilla-cli/    # thin clap wrapper over zorilla-core; binary name: zorilla
-```
-
-Dependencies are pinned in `[workspace.dependencies]` at the root `Cargo.toml`; member crates consume them with `.workspace = true`. Lints are centralized via `[workspace.lints.*]` and opted into per crate with `[lints] workspace = true`.
+Cargo workspace split into `crates/zorilla-core` (library) and `crates/zorilla-cli` (binary). Dependencies are pinned in `[workspace.dependencies]` at the root `Cargo.toml`; member crates consume them with `.workspace = true`. Lints are centralized via `[workspace.lints.*]` and opted into per crate with `[lints] workspace = true`.
 
 ## Common Commands
 
 ```bash
 # Pre-commit checks (always run before committing)
 cargo fmt --all --check && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace
-
-# Run tests
-cargo test --workspace
-
-# Build and install locally for testing (maturin)
-# NOTE: maturin develop requires an activated Python venv. Either
-# `source .venv/bin/activate` first, or export `VIRTUAL_ENV=/path/to/venv`
-# — adding the venv's bin/ to PATH alone is not enough.
-maturin develop
-
-# Run the CLI directly from a workspace checkout
-cargo run -p zorilla-cli -- check path/to/tests
-
-# `check FILE` lints FILE directly, regardless of name (include globs
-# only apply to directory walks). `check DIR` walks DIR honoring the
-# configured `include` globs (default: `tests/**/*.py`, `**/test_*.py`,
-# `**/*_test.py`, `**/conftest.py`) and `exclude` globs (default:
-# `**/fixtures/**`).
 
 # Full review (fmt, clippy, tests, audit, deny)
 make review
