@@ -97,16 +97,19 @@ fn check(paths: Vec<PathBuf>, format: Format) -> anyhow::Result<ExitCode> {
 }
 
 /// Handle the `list-rules` subcommand — dump every registered rule in a
-/// padded text table. Column widths mirror the brief: CODE=6, NAME=26,
-/// DEFAULT=7. The table is built into a single `String` so we emit one
-/// `print!` call, matching the `check` handler's output shape.
+/// padded text table. Column widths mirror the brief: CODE=6, NAME=26.
+/// The trailing DEFAULT column is unpadded — padding the last column
+/// would emit 4–5 trailing spaces on every row for no alignment benefit
+/// and trip whitespace-sensitive tooling (gitleaks, editors, diff).
+/// The table is built into a single `String` so we emit one `print!`
+/// call, matching the `check` handler's output shape.
 fn list_rules() -> ExitCode {
     let mut out = String::new();
     // Header; ignore write-to-String failures because `String` never errors.
-    let _ = writeln!(out, "{:<6}{:<26}{:<7}", "CODE", "NAME", "DEFAULT");
+    let _ = writeln!(out, "{:<6}{:<26}DEFAULT", "CODE", "NAME");
     for rule in rules::registry::all() {
         let default = if rule.default_enabled() { "on" } else { "off" };
-        let _ = writeln!(out, "{:<6}{:<26}{:<7}", rule.code(), rule.name(), default);
+        let _ = writeln!(out, "{:<6}{:<26}{}", rule.code(), rule.name(), default);
     }
     print!("{out}");
     ExitCode::SUCCESS
@@ -118,7 +121,7 @@ fn list_rules() -> ExitCode {
 /// status 2 and an error message on stderr.
 fn explain(code: &str) -> ExitCode {
     let upper = code.to_uppercase();
-    if let Some(rule) = rules::registry::all().iter().find(|r| r.code() == upper) {
+    if let Some(rule) = rules::registry::find(&upper) {
         print!("{}", rule.doc());
         ExitCode::SUCCESS
     } else {

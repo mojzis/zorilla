@@ -67,14 +67,21 @@ mod doc_test {
     use super::registry::all;
 
     #[test]
-    fn every_rule_has_nonempty_doc_starting_with_zr_heading() {
+    fn every_rule_has_nonempty_doc_starting_with_its_own_zr_heading() {
+        // Tightened from "starts with `# ZR`" to "starts with `# <code>`"
+        // so a copy-paste failure (e.g. `zr003_no_assertion.rs` pointing
+        // its `include_str!` at `docs/rules/ZR002.md`) is caught here
+        // rather than surfacing as a confusing `explain` output at
+        // runtime.
         for rule in all() {
             let doc = rule.doc();
             assert!(!doc.is_empty(), "{} doc is empty", rule.code());
+            let expected_prefix = format!("# {}", rule.code());
             assert!(
-                doc.starts_with("# ZR"),
-                "{} doc must start with `# ZR` heading, got: {:?}",
+                doc.starts_with(&expected_prefix),
+                "{} doc must start with `{}`, got: {:?}",
                 rule.code(),
+                expected_prefix,
                 &doc[..doc.len().min(40)],
             );
         }

@@ -220,6 +220,17 @@ fn list_rules_lists_all_seven_rules() {
     }
     assert!(stdout.contains("CODE"), "missing CODE header in:\n{stdout}");
     assert!(stdout.contains("DEFAULT"), "missing DEFAULT header in:\n{stdout}");
+    // No row may end with trailing whitespace — the DEFAULT column is
+    // the last one and must be unpadded. Regression guard: a prior
+    // implementation padded it with `{:<7}` and trailing spaces leaked
+    // into every row.
+    for line in stdout.lines() {
+        assert_eq!(
+            line,
+            line.trim_end(),
+            "row has trailing whitespace: {line:?}\nfull output:\n{stdout}"
+        );
+    }
 }
 
 #[test]

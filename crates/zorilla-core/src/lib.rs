@@ -107,7 +107,7 @@ fn lint_one_file(
 /// `Report` type to hold a rule-name slice per finding.
 #[must_use]
 pub fn rule_name_for(code: &str) -> &'static str {
-    rules::registry::all().iter().find(|r| r.code() == code).map_or("unknown", |r| r.name())
+    rules::registry::find(code).map_or("unknown", Rule::name)
 }
 
 #[cfg(test)]

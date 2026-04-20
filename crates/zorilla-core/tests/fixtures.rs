@@ -47,9 +47,7 @@ fn fixtures_root() -> PathBuf {
 }
 
 fn rule_by_code(code: &str) -> &'static dyn Rule {
-    *registry::all()
-        .iter()
-        .find(|r| r.code() == code)
+    registry::find(code)
         .unwrap_or_else(|| panic!("fixture dir {code} has no matching rule in registry"))
 }
 

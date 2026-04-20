@@ -6,13 +6,58 @@
       "tool": {
         "driver": {
           "name": "zorilla",
-          "version": "0.1.0",
-          "informationUri": "https://github.com/mojzis/zorilla"
+          "version": "<normalised>",
+          "informationUri": "https://github.com/mojzis/zorilla",
+          "rules": [
+            {
+              "id": "ZR001",
+              "name": "conditional-test-logic",
+              "shortDescription": { "text": "conditional-test-logic" },
+              "fullDescription": { "text": "<normalised>" }
+            },
+            {
+              "id": "ZR002",
+              "name": "sleep-in-test",
+              "shortDescription": { "text": "sleep-in-test" },
+              "fullDescription": { "text": "<normalised>" }
+            },
+            {
+              "id": "ZR003",
+              "name": "no-assertion",
+              "shortDescription": { "text": "no-assertion" },
+              "fullDescription": { "text": "<normalised>" }
+            },
+            {
+              "id": "ZR004",
+              "name": "assertion-roulette",
+              "shortDescription": { "text": "assertion-roulette" },
+              "fullDescription": { "text": "<normalised>" }
+            },
+            {
+              "id": "ZR005",
+              "name": "mystery-guest",
+              "shortDescription": { "text": "mystery-guest" },
+              "fullDescription": { "text": "<normalised>" }
+            },
+            {
+              "id": "ZR006",
+              "name": "patch-stack",
+              "shortDescription": { "text": "patch-stack" },
+              "fullDescription": { "text": "<normalised>" }
+            },
+            {
+              "id": "ZR007",
+              "name": "empty-test",
+              "shortDescription": { "text": "empty-test" },
+              "fullDescription": { "text": "<normalised>" }
+            }
+          ]
         }
       },
       "results": [
         {
           "ruleId": "ZR001",
+          "ruleIndex": 0,
           "level": "warning",
           "message": {
             "text": "test function has conditional logic (if/for/while/try)"

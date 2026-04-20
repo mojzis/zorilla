@@ -157,13 +157,39 @@ impl Report {
     /// Paths are shortened relative to `base` — the same shape text
     /// emits. Output ends with a trailing newline to match
     /// [`Report::render_text`]. No trailing summary line.
+    ///
+    /// `runs[0].tool.driver.rules` is populated from
+    /// [`crate::rules::registry::all`] so SARIF consumers (GitHub
+    /// code-scanning, Sonar, …) can display each rule's human name and
+    /// long-form description on hover. Each result emits a `ruleIndex`
+    /// pointing into this array; unknown codes (shouldn't happen for
+    /// engine-produced findings, but keep the mapping defensive) fall
+    /// back to emitting no `ruleIndex` rather than panicking.
     #[must_use]
     pub fn render_sarif(&self, base: &Path) -> String {
+        // Build the reportingDescriptor catalogue once per run, and a
+        // parallel `code -> index` map for per-result lookup.
+        let registry = crate::rules::registry::all();
+        let rules_meta: Vec<SarifReportingDescriptor<'_>> = registry
+            .iter()
+            .map(|r| SarifReportingDescriptor {
+                id: r.code(),
+                name: r.name(),
+                short_description: SarifMessage { text: r.name() },
+                full_description: SarifMessage { text: r.doc() },
+            })
+            .collect();
+        // Linear scan over 7 rules is faster than building a HashMap;
+        // revisit only if the registry grows past a couple dozen.
+        let index_of =
+            |code: &str| -> Option<usize> { registry.iter().position(|r| r.code() == code) };
+
         let results: Vec<SarifResult<'_>> = self
             .findings
             .iter()
             .map(|f| SarifResult {
                 rule_id: f.code,
+                rule_index: index_of(f.code),
                 level: f.severity.as_str(),
                 message: SarifMessage { text: &f.message },
                 locations: vec![SarifLocation {
@@ -186,6 +212,7 @@ impl Report {
                         name: "zorilla",
                         version: env!("CARGO_PKG_VERSION"),
                         information_uri: "https://github.com/mojzis/zorilla",
+                        rules: rules_meta,
                     },
                 },
                 results,
@@ -236,12 +263,34 @@ struct SarifDriver<'a> {
     name: &'a str,
     version: &'a str,
     information_uri: &'a str,
+    /// Rule catalogue; see `Report::render_sarif` for construction.
+    rules: Vec<SarifReportingDescriptor<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifReportingDescriptor<'a> {
+    /// Rule code (matches `result.ruleId`), e.g. `"ZR001"`.
+    id: &'a str,
+    /// Kebab-case human name, e.g. `"conditional-test-logic"`.
+    name: &'a str,
+    /// Short summary — SARIF viewers show this inline next to the id.
+    short_description: SarifMessage<'a>,
+    /// Long-form markdown (the embedded `docs/rules/ZR00N.md`) — shown
+    /// on rule hover / in the rule catalogue. Markdown is permitted per
+    /// SARIF §3.49.6.
+    full_description: SarifMessage<'a>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SarifResult<'a> {
     rule_id: &'a str,
+    /// Index into `runs[0].tool.driver.rules`, when the rule code is
+    /// known. `None` (elided from JSON) for findings whose code is
+    /// missing from the registry — defensive, not expected in practice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rule_index: Option<usize>,
     level: &'a str,
     message: SarifMessage<'a>,
     locations: Vec<SarifLocation>,
@@ -512,12 +561,65 @@ tests/test_b.py:3:1: ZR001 conditional-test-logic: test function has conditional
         let results = runs[0]["results"].as_array().unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["ruleId"], "ZR001");
+        // ZR001 is the first entry in the registry, so its index is 0.
+        assert_eq!(results[0]["ruleIndex"], 0);
         assert_eq!(results[0]["level"], "warning");
         assert_eq!(results[0]["message"]["text"], "test function has conditional logic");
         let loc = &results[0]["locations"][0]["physicalLocation"];
         assert_eq!(loc["artifactLocation"]["uri"], "tests/test_a.py");
         assert_eq!(loc["region"]["startLine"], 3);
         assert_eq!(loc["region"]["startColumn"], 5);
+    }
+
+    #[test]
+    fn sarif_driver_rules_lists_every_registered_rule() {
+        // Proof that `tool.driver.rules` is populated with the full
+        // registry — GitHub code-scanning / Sonar consume this to render
+        // human-readable titles and long-form descriptions on hover.
+        let report = Report { findings: Vec::new(), files_discovered: 0 };
+        let sarif = report.render_sarif(Path::new(""));
+        let parsed: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+        let rules = parsed["runs"][0]["tool"]["driver"]["rules"].as_array().unwrap();
+        let codes: Vec<&str> =
+            rules.iter().map(|r| r["id"].as_str().expect("id is string")).collect();
+        assert_eq!(codes, vec!["ZR001", "ZR002", "ZR003", "ZR004", "ZR005", "ZR006", "ZR007"]);
+        // Every descriptor must carry a non-empty short + full
+        // description; otherwise SARIF viewers fall back to the bare id,
+        // defeating the point of populating the catalogue.
+        for r in rules {
+            assert!(!r["name"].as_str().unwrap().is_empty());
+            assert!(!r["shortDescription"]["text"].as_str().unwrap().is_empty());
+            let full = r["fullDescription"]["text"].as_str().unwrap();
+            assert!(
+                full.starts_with("# ZR"),
+                "fullDescription must be the embedded doc, got: {full:.40}"
+            );
+        }
+    }
+
+    #[test]
+    fn sarif_result_rule_index_is_elided_for_unknown_codes() {
+        // Defensive: a hand-constructed Finding with a code not in the
+        // registry must not break serialization and must not ship a
+        // nonsense `ruleIndex`. Engine-produced findings always have
+        // registered codes, but this guards against test / programmatic
+        // construction.
+        let report = Report {
+            findings: vec![Finding {
+                code: "ZR999",
+                message: "synthetic".into(),
+                file: PathBuf::from("/tmp/root/tests/test_a.py"),
+                line: 1,
+                column: 1,
+                severity: Severity::Warning,
+            }],
+            files_discovered: 1,
+        };
+        let sarif = report.render_sarif(Path::new("/tmp/root"));
+        let parsed: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+        let result = &parsed["runs"][0]["results"][0];
+        assert_eq!(result["ruleId"], "ZR999");
+        assert!(result.get("ruleIndex").is_none(), "ruleIndex should be elided for unknown codes");
     }
 
     #[test]

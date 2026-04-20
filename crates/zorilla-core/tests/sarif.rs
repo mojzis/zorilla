@@ -52,10 +52,44 @@ fn render_sarif_matches_schema_and_expected_document() {
     // Full-document diff against the checked-in expected file. This
     // locks the shape end-to-end so a future refactor can't silently
     // drop, rename, or reorder a required field.
+    //
+    // Two fields are normalised before the diff:
+    //
+    // - `tool.driver.version` interpolates `env!("CARGO_PKG_VERSION")`
+    //   at build time. Embedding the literal in the fixture would break
+    //   the test on every version bump with a misleading "SARIF output
+    //   diverged" message. Overwrite both sides with the build-time
+    //   value so the diff stays version-agnostic.
+    // - `tool.driver.rules[*].fullDescription.text` contains the full
+    //   embedded `docs/rules/ZR00N.md` body (hundreds of lines across
+    //   seven rules). The registry-wide catalogue shape is covered by
+    //   report.rs unit tests; here we only lock the *shape* (codes +
+    //   names) while normalising the markdown bodies to avoid a fragile
+    //   fixture that regenerates on every doc edit.
     let expected_path = dir.join("test_positive.sarif.json");
     let expected_text =
         std::fs::read_to_string(&expected_path).expect("expected sarif fixture readable");
-    let expected: serde_json::Value =
+    let mut expected: serde_json::Value =
         serde_json::from_str(&expected_text).expect("expected sarif parses");
-    assert_eq!(parsed, expected, "SARIF output diverged from fixture");
+    let mut actual = parsed.clone();
+    normalise(&mut expected);
+    normalise(&mut actual);
+    assert_eq!(actual, expected, "SARIF output diverged from fixture");
+}
+
+/// Strip version and full-description markdown before the fixture diff.
+/// See `render_sarif_matches_schema_and_expected_document` for why.
+fn normalise(v: &mut serde_json::Value) {
+    if let Some(driver) = v.pointer_mut("/runs/0/tool/driver") {
+        if let Some(obj) = driver.as_object_mut() {
+            obj.insert("version".into(), serde_json::Value::String("<normalised>".into()));
+        }
+        if let Some(rules) = driver.pointer_mut("/rules").and_then(|r| r.as_array_mut()) {
+            for rule in rules {
+                if let Some(full) = rule.pointer_mut("/fullDescription/text") {
+                    *full = serde_json::Value::String("<normalised>".into());
+                }
+            }
+        }
+    }
 }
