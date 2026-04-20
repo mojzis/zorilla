@@ -11,6 +11,7 @@ pub mod discovery;
 pub mod parse;
 pub mod report;
 pub mod rules;
+pub mod stats;
 pub mod suppress;
 
 use std::path::Path;
@@ -22,6 +23,7 @@ pub use discovery::{discover, DiscoveryError};
 pub use parse::ParseError;
 pub use report::{Finding, Report, Severity};
 pub use rules::{Context, Rule};
+pub use stats::{compute_stats, format_stats_json, format_stats_text, ScanStats};
 pub use suppress::Suppressions;
 
 /// Error surfaced to callers of [`lint`].

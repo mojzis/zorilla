@@ -131,6 +131,35 @@ scanning, SonarQube, etc.) ingest directly:
 JSON and SARIF output both omit the trailing human-readable summary
 line so stdout parses cleanly.
 
+### Scan statistics
+
+`zorilla stats` post-processes a scan into aggregate counters and a
+per-rule breakdown. Use it for CI dashboards, quick health checks, or a
+high-level snapshot of how many tests are flagged and by which rules.
+Unlike `check`, it always exits `0` — it is a report, not a gate.
+
+```
+$ zorilla stats path/to/tests
+Scan statistics:
+  Files scanned:        12
+  Files with findings:  3
+  Clean files:          9
+  Total findings:       7
+
+Breakdown by rule:
+  ZR001 conditional-test-logic:  2
+  ZR002 sleep-in-test:           1
+  ZR003 no-assertion:            4
+  ZR004 assertion-roulette:      0
+  ZR005 mystery-guest:           0
+  ZR006 patch-stack:             0
+  ZR007 empty-test:              0
+```
+
+Add `--format json` to emit a parseable summary (flat counters plus a
+`breakdown` object keyed by rule code). `--files` and `--files-from`
+work the same way they do for `check`.
+
 ### List and explain
 
 ```

@@ -10,7 +10,9 @@ use std::process::ExitCode;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
-use zorilla_core::{lint, rule_name_for, rules, Config};
+use zorilla_core::{
+    compute_stats, format_stats_json, format_stats_text, lint, rule_name_for, rules, Config,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "zorilla", about = "pytest test-smell linter", version)]
@@ -43,6 +45,23 @@ enum Command {
         /// Rule code, e.g. "ZR001" (case-insensitive).
         code: String,
     },
+    /// Print aggregate statistics for a scan (files scanned,
+    /// findings per rule). Always exits 0 — this is a report, not a gate.
+    Stats {
+        /// Paths to scan. Defaults to the current directory.
+        #[arg(value_name = "PATH")]
+        paths: Vec<PathBuf>,
+        /// Output format. Stats/overview support `text` and `json`;
+        /// SARIF does not fit aggregate summaries.
+        #[arg(long, value_enum, default_value_t = SummaryFormat::Text)]
+        format: SummaryFormat,
+        /// Read paths to scan from this file (one per line). Use "-" to read stdin.
+        #[arg(long, value_name = "FILE")]
+        files_from: Option<PathBuf>,
+        /// Additional path to scan. May be repeated.
+        #[arg(long = "files", value_name = "PATH")]
+        files: Vec<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -50,6 +69,15 @@ enum Format {
     Text,
     Json,
     Sarif,
+}
+
+/// Output formats supported by aggregate-summary subcommands
+/// (`stats`, future `overview`). Deliberately separate from
+/// [`Format`] so SARIF cannot be routed into a summary by accident.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SummaryFormat {
+    Text,
+    Json,
 }
 
 fn main() -> ExitCode {
@@ -70,6 +98,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Command::ListRules => Ok(list_rules()),
         Command::Explain { code } => Ok(explain(&code)),
+        Command::Stats { paths, format, files_from, files } => {
+            stats(paths, format, files_from.as_deref(), files)
+        }
     }
 }
 
@@ -79,32 +110,8 @@ fn check(
     files_from: Option<&Path>,
     files: Vec<PathBuf>,
 ) -> anyhow::Result<ExitCode> {
-    // Build the final path list as the concatenation of positional args,
-    // `--files` repeats, and lines read from `--files-from` (stdin or a
-    // file). If the merged list is empty, default to CWD — the existing
-    // "bare `zorilla check`" behaviour.
-    let mut merged: Vec<PathBuf> = Vec::new();
-    merged.extend(paths);
-    merged.extend(files);
-    if let Some(src) = files_from {
-        merged.extend(read_files_from(src)?);
-    }
-
-    let paths: Vec<PathBuf> = if merged.is_empty() {
-        vec![std::env::current_dir().context("getting current directory")?]
-    } else {
-        merged
-    };
-
-    // Discover config starting from the first target path so running
-    // `zorilla check /some/project/tests/` from a different cwd still
-    // picks up that project's `pyproject.toml` / `zorilla.toml`. Matches
-    // the behavior of ruff / black / mypy. Fall back to the path itself
-    // when it's a directory.
-    let first = &paths[0];
-    let search_start: &Path =
-        if first.is_file() { first.parent().unwrap_or(first.as_path()) } else { first.as_path() };
-    let config = Config::discover(search_start).context("loading configuration")?;
+    let paths = resolve_inputs(paths, files, files_from)?;
+    let config = load_config_for(&paths)?;
 
     let report = lint(&paths, &config).context("running lint")?;
     // Use the first user-supplied path as the base for display paths —
@@ -122,6 +129,65 @@ fn check(
     };
     print!("{rendered}");
     Ok(ExitCode::from(report.exit_code()))
+}
+
+/// Handle the `stats` subcommand — post-process a scan into aggregate
+/// counters and a per-rule breakdown. Shares `resolve_inputs` and
+/// `load_config_for` with `check` so both flows see the same paths and
+/// config. Always exits 0 — `stats` is a report, not a gate.
+fn stats(
+    paths: Vec<PathBuf>,
+    format: SummaryFormat,
+    files_from: Option<&Path>,
+    files: Vec<PathBuf>,
+) -> anyhow::Result<ExitCode> {
+    let paths = resolve_inputs(paths, files, files_from)?;
+    let config = load_config_for(&paths)?;
+
+    let report = lint(&paths, &config).context("running lint")?;
+    let stats = compute_stats(&report);
+    let rendered = match format {
+        SummaryFormat::Text => format_stats_text(&stats),
+        SummaryFormat::Json => format_stats_json(&stats).context("formatting stats as JSON")?,
+    };
+    print!("{rendered}");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Merge positional paths, `--files` repeats, and `--files-from` lines
+/// into a single input list. If every source is empty, default to the
+/// current working directory — matches the existing bare
+/// `zorilla check` behaviour.
+fn resolve_inputs(
+    paths: Vec<PathBuf>,
+    files: Vec<PathBuf>,
+    files_from: Option<&Path>,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let mut merged: Vec<PathBuf> = Vec::new();
+    merged.extend(paths);
+    merged.extend(files);
+    if let Some(src) = files_from {
+        merged.extend(read_files_from(src)?);
+    }
+
+    if merged.is_empty() {
+        Ok(vec![std::env::current_dir().context("getting current directory")?])
+    } else {
+        Ok(merged)
+    }
+}
+
+/// Discover config starting from the first target path so running
+/// `zorilla check /some/project/tests/` from a different cwd still
+/// picks up that project's `pyproject.toml` / `zorilla.toml`. Matches
+/// the behavior of ruff / black / mypy. Fall back to the path itself
+/// when it's a directory.
+fn load_config_for(paths: &[PathBuf]) -> anyhow::Result<Config> {
+    // `resolve_inputs` guarantees `paths` is non-empty; be defensive
+    // anyway so a future refactor that bypasses it can't panic.
+    let first = paths.first().map_or_else(|| Path::new("."), PathBuf::as_path);
+    let search_start: &Path = if first.is_file() { first.parent().unwrap_or(first) } else { first };
+    Config::discover(search_start).context("loading configuration")
 }
 
 /// Read paths (one per line) from either stdin (when `src == "-"`) or

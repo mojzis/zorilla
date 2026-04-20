@@ -415,6 +415,101 @@ fn check_files_from_file_path() {
 }
 
 #[test]
+fn stats_help_mentions_format_and_files_flags() {
+    // Advertises the full surface: the `--format` summary flag and the
+    // two input-plumbing flags `stats` inherits from `check`.
+    let assert =
+        Command::cargo_bin("zorilla").unwrap().arg("stats").arg("--help").assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("--format"), "stats --help missing --format:\n{stdout}");
+    assert!(stdout.contains("--files-from"), "stats --help missing --files-from:\n{stdout}");
+    assert!(stdout.contains("--files"), "stats --help missing --files:\n{stdout}");
+}
+
+#[test]
+fn stats_on_empty_directory_reports_zero_counts_and_exits_zero() {
+    let tmp = TempDir::new().unwrap();
+    let assert =
+        Command::cargo_bin("zorilla").unwrap().arg("stats").arg(tmp.path()).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("Files scanned:"), "missing `Files scanned:` in:\n{stdout}");
+    assert!(stdout.contains("Total findings:"), "missing `Total findings:` in:\n{stdout}");
+    // Every summary counter should read zero on an empty directory.
+    for label in ["Files scanned:", "Files with findings:", "Clean files:", "Total findings:"] {
+        let line = stdout
+            .lines()
+            .find(|l| l.contains(label))
+            .unwrap_or_else(|| panic!("label {label} not found in:\n{stdout}"));
+        assert!(line.trim_end().ends_with('0'), "expected {label} to end in 0, got: {line}");
+    }
+}
+
+#[test]
+fn stats_on_tree_with_findings_reports_nonzero_breakdown_and_exits_zero() {
+    let tmp = TempDir::new().unwrap();
+    let tests = tmp.path().join("tests");
+    std::fs::create_dir_all(&tests).unwrap();
+    // Two test functions with conditionals — two ZR001 findings.
+    std::fs::write(tests.join("test_a.py"), "def test_x():\n    if True:\n        assert True\n")
+        .unwrap();
+    std::fs::write(
+        tests.join("test_b.py"),
+        "def test_y():\n    for i in (1,):\n        assert i\n",
+    )
+    .unwrap();
+
+    let assert =
+        Command::cargo_bin("zorilla").unwrap().arg("stats").arg(tmp.path()).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("Files scanned:"), "missing `Files scanned:` in:\n{stdout}");
+
+    // At least one rule row must have a non-zero count. We know ZR001
+    // fired twice above; locate that row and assert its count > 0.
+    let zr001_line = stdout
+        .lines()
+        .find(|l| l.contains("ZR001") && l.contains("conditional-test-logic"))
+        .unwrap_or_else(|| panic!("missing ZR001 row in:\n{stdout}"));
+    let count: usize = zr001_line
+        .split_whitespace()
+        .next_back()
+        .and_then(|t| t.parse().ok())
+        .unwrap_or_else(|| panic!("could not parse count from: {zr001_line}"));
+    assert!(count > 0, "expected non-zero ZR001 count in {zr001_line}");
+}
+
+#[test]
+fn stats_format_json_produces_parseable_output_with_required_keys() {
+    let tmp = TempDir::new().unwrap();
+    let tests = tmp.path().join("tests");
+    std::fs::create_dir_all(&tests).unwrap();
+    std::fs::write(tests.join("test_a.py"), "def test_x():\n    if True:\n        assert True\n")
+        .unwrap();
+
+    let assert = Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("stats")
+        .arg(tmp.path())
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stats --format json stdout parses as JSON");
+    for key in
+        ["files_scanned", "files_with_findings", "clean_files", "total_findings", "breakdown"]
+    {
+        assert!(parsed.get(key).is_some(), "missing key {key} in JSON output:\n{stdout}");
+    }
+    // Breakdown must be an object; engine ran at least once, so at
+    // minimum the registered rule codes should be present as keys.
+    let breakdown = parsed["breakdown"].as_object().expect("breakdown is an object");
+    for code in ["ZR001", "ZR002", "ZR003", "ZR004", "ZR005", "ZR006", "ZR007"] {
+        assert!(breakdown.contains_key(code), "missing {code} in breakdown:\n{stdout}");
+    }
+}
+
+#[test]
 fn check_on_tree_with_conditional_test_emits_zr001_finding() {
     let tmp = TempDir::new().unwrap();
     let tests = tmp.path().join("tests");
