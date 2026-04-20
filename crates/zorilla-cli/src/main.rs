@@ -4,6 +4,7 @@
 //! Exit codes: `0` (clean), `1` (findings), `2` (error).
 
 use std::fmt::Write as _;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -28,6 +29,12 @@ enum Command {
         /// Output format.
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
+        /// Read paths to lint from this file (one per line). Use "-" to read stdin.
+        #[arg(long, value_name = "FILE")]
+        files_from: Option<PathBuf>,
+        /// Additional path to lint. May be repeated.
+        #[arg(long = "files", value_name = "PATH")]
+        files: Vec<PathBuf>,
     },
     /// List all available rules.
     ListRules,
@@ -58,15 +65,36 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     match cli.command {
-        Command::Check { paths, format } => check(paths, format),
+        Command::Check { paths, format, files_from, files } => {
+            check(paths, format, files_from.as_deref(), files)
+        }
         Command::ListRules => Ok(list_rules()),
         Command::Explain { code } => Ok(explain(&code)),
     }
 }
 
-fn check(paths: Vec<PathBuf>, format: Format) -> anyhow::Result<ExitCode> {
-    let cwd = std::env::current_dir().context("getting current directory")?;
-    let paths = if paths.is_empty() { vec![cwd] } else { paths };
+fn check(
+    paths: Vec<PathBuf>,
+    format: Format,
+    files_from: Option<&Path>,
+    files: Vec<PathBuf>,
+) -> anyhow::Result<ExitCode> {
+    // Build the final path list as the concatenation of positional args,
+    // `--files` repeats, and lines read from `--files-from` (stdin or a
+    // file). If the merged list is empty, default to CWD — the existing
+    // "bare `zorilla check`" behaviour.
+    let mut merged: Vec<PathBuf> = Vec::new();
+    merged.extend(paths);
+    merged.extend(files);
+    if let Some(src) = files_from {
+        merged.extend(read_files_from(src)?);
+    }
+
+    let paths: Vec<PathBuf> = if merged.is_empty() {
+        vec![std::env::current_dir().context("getting current directory")?]
+    } else {
+        merged
+    };
 
     // Discover config starting from the first target path so running
     // `zorilla check /some/project/tests/` from a different cwd still
@@ -94,6 +122,45 @@ fn check(paths: Vec<PathBuf>, format: Format) -> anyhow::Result<ExitCode> {
     };
     print!("{rendered}");
     Ok(ExitCode::from(report.exit_code()))
+}
+
+/// Read paths (one per line) from either stdin (when `src == "-"`) or
+/// the file at `src`. Skips blank lines and `#` comments; strips
+/// trailing `\r` for Windows line endings and trims surrounding
+/// whitespace. Empty input yields an empty Vec — the caller is
+/// responsible for defaulting to CWD.
+fn read_files_from(src: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    if src.as_os_str() == "-" {
+        let stdin = std::io::stdin();
+        let mut out = Vec::new();
+        for line in stdin.lock().lines() {
+            let line = line.context("reading --files-from stdin")?;
+            if let Some(path) = parse_files_from_line(&line) {
+                out.push(path);
+            }
+        }
+        Ok(out)
+    } else {
+        let contents = std::fs::read_to_string(src).context("reading --files-from")?;
+        let mut out = Vec::new();
+        for line in contents.lines() {
+            if let Some(path) = parse_files_from_line(line) {
+                out.push(path);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Normalise one line from `--files-from` input. Returns `None` for
+/// blank lines and `#`-comments; returns `Some(PathBuf)` otherwise.
+fn parse_files_from_line(line: &str) -> Option<PathBuf> {
+    let trimmed = line.strip_suffix('\r').unwrap_or(line).trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
 }
 
 /// Handle the `list-rules` subcommand — dump every registered rule in a

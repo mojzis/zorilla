@@ -266,6 +266,149 @@ fn explain_unknown_code_exits_two() {
 }
 
 #[test]
+fn check_files_from_stdin_lints_only_listed_files() {
+    // Piping one path via `--files-from -` must lint exactly that file
+    // — and produce the same text output as invoking `check PATH`
+    // directly on it. This pins the "stdin paths bypass include/exclude
+    // globs the same way explicit file args do" invariant.
+    let tmp = TempDir::new().unwrap();
+    // Non-test-prefixed name ensures it would NOT match the default
+    // include globs on a directory walk; only the explicit-path bypass
+    // lets it be linted here.
+    let file = tmp.path().join("scratch.py");
+    std::fs::write(&file, "def test_x():\n    if True:\n        assert True\n").unwrap();
+
+    let baseline = Command::cargo_bin("zorilla").unwrap().arg("check").arg(&file).assert().code(1);
+    let baseline_stdout = String::from_utf8(baseline.get_output().stdout.clone()).unwrap();
+
+    let piped = Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg("--files-from")
+        .arg("-")
+        .write_stdin(format!("{}\n", file.display()))
+        .assert()
+        .code(1);
+    let piped_stdout = String::from_utf8(piped.get_output().stdout.clone()).unwrap();
+
+    assert_eq!(baseline_stdout, piped_stdout);
+}
+
+#[test]
+fn check_files_from_stdin_skips_comments_and_blank_lines() {
+    // Blank lines and `#` comments must be ignored — pre-commit and
+    // shell pipelines sometimes emit them, and the user's list file
+    // may contain TODO annotations.
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("scratch.py");
+    std::fs::write(&file, "def test_x():\n    if True:\n        assert True\n").unwrap();
+
+    let baseline = Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg("--files-from")
+        .arg("-")
+        .write_stdin(format!("{}\n", file.display()))
+        .assert()
+        .code(1);
+    let baseline_stdout = String::from_utf8(baseline.get_output().stdout.clone()).unwrap();
+
+    let with_noise = Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg("--files-from")
+        .arg("-")
+        .write_stdin(format!("# a comment\n\n{}\n   \n", file.display()))
+        .assert()
+        .code(1);
+    let with_noise_stdout = String::from_utf8(with_noise.get_output().stdout.clone()).unwrap();
+
+    assert_eq!(baseline_stdout, with_noise_stdout);
+}
+
+#[test]
+fn check_files_from_empty_input_reports_zero_findings() {
+    // Empty stdin after filtering yields no paths and no findings —
+    // NOT an error. This is the "pre-commit ran but no Python files
+    // changed" path.
+    Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg("--files-from")
+        .arg("-")
+        .write_stdin("")
+        .assert()
+        .success()
+        .stdout(contains("0 findings in 0 files discovered."));
+}
+
+#[test]
+fn check_files_flag_is_repeatable() {
+    // `--files PATH1 --files PATH2` must lint both paths. Use two
+    // files with different rule violations so the combined run's
+    // finding count is strictly greater than either alone.
+    let tmp = TempDir::new().unwrap();
+    let a = tmp.path().join("a.py");
+    std::fs::write(&a, "def test_x():\n    if True:\n        assert True\n").unwrap();
+    let b = tmp.path().join("b.py");
+    std::fs::write(&b, "import time\n\ndef test_y():\n    time.sleep(1)\n    assert True\n")
+        .unwrap();
+
+    let assert = Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg("--files")
+        .arg(&a)
+        .arg("--files")
+        .arg(&b)
+        .assert()
+        .code(1);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.contains("ZR001"), "expected ZR001 from a.py in:\n{stdout}");
+    assert!(stdout.contains("ZR002"), "expected ZR002 from b.py in:\n{stdout}");
+    assert!(
+        stdout.contains("2 findings in 2 files discovered."),
+        "expected combined summary in:\n{stdout}"
+    );
+}
+
+#[test]
+fn check_files_from_file_path() {
+    // Passing `--files-from LIST_FILE` must produce the same output as
+    // piping the same content to `--files-from -`. Pins parity between
+    // the two delivery modes.
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("scratch.py");
+    std::fs::write(&file, "def test_x():\n    if True:\n        assert True\n").unwrap();
+
+    let list_file = tmp.path().join("paths.txt");
+    let list_content = format!("# header comment\n\n{}\n", file.display());
+    std::fs::write(&list_file, &list_content).unwrap();
+
+    let from_file = Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg("--files-from")
+        .arg(&list_file)
+        .assert()
+        .code(1);
+    let from_file_stdout = String::from_utf8(from_file.get_output().stdout.clone()).unwrap();
+
+    let from_stdin = Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg("--files-from")
+        .arg("-")
+        .write_stdin(list_content)
+        .assert()
+        .code(1);
+    let from_stdin_stdout = String::from_utf8(from_stdin.get_output().stdout.clone()).unwrap();
+
+    assert_eq!(from_file_stdout, from_stdin_stdout);
+}
+
+#[test]
 fn check_on_tree_with_conditional_test_emits_zr001_finding() {
     let tmp = TempDir::new().unwrap();
     let tests = tmp.path().join("tests");
