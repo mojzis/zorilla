@@ -73,19 +73,15 @@ fn check(paths: Vec<PathBuf>, format: Format) -> anyhow::Result<ExitCode> {
     // matches `path_arg.join(relative_from_walker)` shape from context.md
     // gotchas.
     let base: &Path = paths.first().map_or_else(|| Path::new(""), PathBuf::as_path);
-    match format {
-        Format::Text => {
-            let text = report.render_text(base, rule_name_for);
-            print!("{text}");
-        }
-        Format::Json => {
-            // JSON and SARIF skip the trailing summary line so consumers
-            // can feed stdout straight into parsers.
-            println!("{}", report.render_json(base));
-        }
-        Format::Sarif => {
-            println!("{}", report.render_sarif(base));
-        }
-    }
+    // All three renderers return a string ending in `\n`, so `print!`
+    // (not `println!`) produces exactly one trailing newline on stdout
+    // regardless of format. JSON and SARIF also skip the text summary
+    // line so consumers can feed stdout straight into parsers.
+    let rendered = match format {
+        Format::Text => report.render_text(base, rule_name_for),
+        Format::Json => report.render_json(base),
+        Format::Sarif => report.render_sarif(base),
+    };
+    print!("{rendered}");
     Ok(ExitCode::from(report.exit_code()))
 }

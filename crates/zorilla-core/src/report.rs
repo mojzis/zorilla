@@ -120,7 +120,9 @@ impl Report {
     /// One object per finding, in the same order as
     /// [`Report::render_text`] (sorted by file, then line, then column,
     /// just like `Report.findings`). Paths are shortened relative to
-    /// `base` — the same shape text emits.
+    /// `base` — the same shape text emits. Output ends with a trailing
+    /// newline to match [`Report::render_text`] — callers can use
+    /// `print!` for all formats without double-newline surprises.
     ///
     /// No trailing summary line — callers that want the summary should
     /// use `render_text`.
@@ -139,14 +141,22 @@ impl Report {
             })
             .collect();
         // `serde_json::to_string_pretty` over a `Vec<FindingJson>` cannot
-        // fail — all fields serialize infallibly.
-        serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".to_string())
+        // fail at runtime — every field is `&str` / `usize` / owned
+        // `String` with no custom `Serialize` impl, no non-string map
+        // key, and no float. If this ever does fail, we'd rather abort
+        // than silently emit `[]` (which would lie about the finding
+        // count and mask a serious bug).
+        let mut out = serde_json::to_string_pretty(&items)
+            .expect("FindingJson serializes infallibly; see Report::render_json invariants");
+        out.push('\n');
+        out
     }
 
     /// Render the findings as a SARIF 2.1.0 log document.
     ///
     /// Paths are shortened relative to `base` — the same shape text
-    /// emits. No trailing summary line.
+    /// emits. Output ends with a trailing newline to match
+    /// [`Report::render_text`]. No trailing summary line.
     #[must_use]
     pub fn render_sarif(&self, base: &Path) -> String {
         let results: Vec<SarifResult<'_>> = self
@@ -181,7 +191,13 @@ impl Report {
                 results,
             }],
         };
-        serde_json::to_string_pretty(&log).unwrap_or_else(|_| "{}".to_string())
+        // See `render_json` for why we `expect` — same infallibility
+        // argument holds for `SarifLog`. Silent fallback to `"{}"` would
+        // hide regressions far worse than a panic.
+        let mut out = serde_json::to_string_pretty(&log)
+            .expect("SarifLog serializes infallibly; see Report::render_sarif invariants");
+        out.push('\n');
+        out
     }
 }
 
@@ -323,6 +339,55 @@ mod tests {
     #[test]
     fn severity_defaults_to_warning() {
         assert_eq!(Severity::default(), Severity::Warning);
+    }
+
+    #[test]
+    fn severity_as_str_maps_both_variants() {
+        // Locks the lowercase strings consumed by the SARIF `level`
+        // enumeration (`warning` / `error`) and the JSON emitter. If a
+        // future variant is added, this assertion forces the author to
+        // update emitter tests too.
+        assert_eq!(Severity::Warning.as_str(), "warning");
+        assert_eq!(Severity::Error.as_str(), "error");
+    }
+
+    #[test]
+    fn json_and_sarif_emit_error_severity_end_to_end() {
+        // Regression guard: no rule currently emits `Severity::Error`,
+        // so without this test the `error` arm of `Severity::as_str`
+        // would never round-trip through the JSON / SARIF emitters.
+        let report = Report {
+            findings: vec![Finding {
+                code: "ZR099",
+                message: "boom".into(),
+                file: PathBuf::from("/tmp/root/tests/test_err.py"),
+                line: 1,
+                column: 1,
+                severity: Severity::Error,
+            }],
+            files_discovered: 1,
+        };
+
+        let json = report.render_json(Path::new("/tmp/root"));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0]["severity"], "error");
+
+        let sarif = report.render_sarif(Path::new("/tmp/root"));
+        let parsed: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+        assert_eq!(parsed["runs"][0]["results"][0]["level"], "error");
+    }
+
+    #[test]
+    fn json_and_sarif_end_with_single_trailing_newline() {
+        // Keeps the three renderers consistent so CLI callers can use
+        // `print!` uniformly without double-newline surprises.
+        let report = Report { findings: Vec::new(), files_discovered: 0 };
+        let json = report.render_json(Path::new(""));
+        assert!(json.ends_with('\n'), "json should end with \\n, got {json:?}");
+        assert!(!json.ends_with("\n\n"), "json should not end with double \\n, got {json:?}");
+        let sarif = report.render_sarif(Path::new(""));
+        assert!(sarif.ends_with('\n'), "sarif should end with \\n, got {sarif:?}");
+        assert!(!sarif.ends_with("\n\n"), "sarif should not end with double \\n, got {sarif:?}");
     }
 
     #[test]
