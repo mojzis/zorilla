@@ -68,10 +68,9 @@ def test_branch_and_wait():
 Run:
 
 ```
-$ zorilla check tests/
-tests/test_demo.py:4:5: ZR001 conditional-test-logic — test function has conditional logic
-tests/test_demo.py:5:9: ZR002 sleep-in-test — sleep() call inside a test
-
+$ zorilla check .
+tests/test_demo.py:4:5: ZR001 conditional-test-logic: test function has conditional logic (if/for/while/try)
+tests/test_demo.py:5:9: ZR002 sleep-in-test: test calls sleep — wait on a condition instead
 2 findings in 1 files discovered.
 ```
 
@@ -81,7 +80,7 @@ run (or an empty directory) exits `0`; an internal error exits `2`.
 ### Output formats
 
 ```bash
-zorilla check --format json tests/
+zorilla check --format json .
 ```
 
 emits a JSON array, one object per finding — suitable for piping into
@@ -91,7 +90,7 @@ emits a JSON array, one object per finding — suitable for piping into
 [
   {
     "code": "ZR001",
-    "message": "test function has conditional logic",
+    "message": "test function has conditional logic (if/for/while/try)",
     "file": "tests/test_demo.py",
     "line": 4,
     "column": 5,
@@ -101,7 +100,7 @@ emits a JSON array, one object per finding — suitable for piping into
 ```
 
 ```bash
-zorilla check --format sarif tests/
+zorilla check --format sarif .
 ```
 
 emits a SARIF 2.1.0 document that most code-scanning tools (GitHub code
@@ -109,7 +108,7 @@ scanning, SonarQube, etc.) ingest directly:
 
 ```json
 {
-  "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json",
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
   "version": "2.1.0",
   "runs": [
     {
@@ -118,7 +117,7 @@ scanning, SonarQube, etc.) ingest directly:
         {
           "ruleId": "ZR001",
           "level": "warning",
-          "message": { "text": "test function has conditional logic" },
+          "message": { "text": "test function has conditional logic (if/for/while/try)" },
           "locations": [ /* ...physicalLocation... */ ]
         }
       ]
@@ -165,10 +164,11 @@ repos:
       - id: zorilla
 ```
 
-The hook entry point is `zorilla check --files-from -`, so pre-commit
-feeds only the staged Python files to zorilla via stdin. `v0.1.0` is
-the target release tag — replace it with whichever tag is current when
-you wire the hook up.
+The hook entry point is `zorilla check`; pre-commit appends only the
+staged Python files as positional arguments, so zorilla lints each one
+directly (bypassing the `include` globs the way any explicit file path
+does). `v0.1.0` is the target release tag — replace it with whichever
+tag is current when you wire the hook up.
 
 ## Configuration
 

@@ -280,6 +280,10 @@ fn check_files_from_stdin_lints_only_listed_files() {
 
     let baseline = Command::cargo_bin("zorilla").unwrap().arg("check").arg(&file).assert().code(1);
     let baseline_stdout = String::from_utf8(baseline.get_output().stdout.clone()).unwrap();
+    // Sanity-anchor the baseline so a silent degradation (both sides
+    // producing empty output, for instance) fails the test instead of
+    // the equality assertion below quietly holding on `""`.
+    assert!(baseline_stdout.contains("ZR001"), "baseline missing ZR001:\n{baseline_stdout}");
 
     let piped = Command::cargo_bin("zorilla")
         .unwrap()
@@ -312,6 +316,7 @@ fn check_files_from_stdin_skips_comments_and_blank_lines() {
         .assert()
         .code(1);
     let baseline_stdout = String::from_utf8(baseline.get_output().stdout.clone()).unwrap();
+    assert!(baseline_stdout.contains("ZR001"), "baseline missing ZR001:\n{baseline_stdout}");
 
     let with_noise = Command::cargo_bin("zorilla")
         .unwrap()
@@ -394,6 +399,7 @@ fn check_files_from_file_path() {
         .assert()
         .code(1);
     let from_file_stdout = String::from_utf8(from_file.get_output().stdout.clone()).unwrap();
+    assert!(from_file_stdout.contains("ZR001"), "baseline missing ZR001:\n{from_file_stdout}");
 
     let from_stdin = Command::cargo_bin("zorilla")
         .unwrap()
