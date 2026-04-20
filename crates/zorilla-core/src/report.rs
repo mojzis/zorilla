@@ -53,6 +53,11 @@ pub struct Finding {
 pub struct Report {
     pub findings: Vec<Finding>,
     pub files_discovered: usize,
+    /// Full list of files discovered by `lint()`, sorted by path. Used by
+    /// the `overview` subcommand to enumerate clean files. `len()`
+    /// matches `files_discovered`; callers that only need the count
+    /// continue to read `files_discovered` for backward compatibility.
+    pub discovered_files: Vec<PathBuf>,
 }
 
 impl Report {
@@ -359,7 +364,8 @@ mod tests {
 
     #[test]
     fn summary_line_shape_is_stable() {
-        let report = Report { findings: Vec::new(), files_discovered: 2 };
+        let report =
+            Report { findings: Vec::new(), files_discovered: 2, discovered_files: Vec::new() };
         assert_eq!(report.summary_line(), "0 findings in 2 files discovered.");
     }
 
@@ -381,6 +387,7 @@ mod tests {
                 severity: Severity::Warning,
             }],
             files_discovered: 1,
+            discovered_files: Vec::new(),
         };
         assert_eq!(report.exit_code(), 1);
     }
@@ -415,6 +422,7 @@ mod tests {
                 severity: Severity::Error,
             }],
             files_discovered: 1,
+            discovered_files: Vec::new(),
         };
 
         let json = report.render_json(Path::new("/tmp/root"));
@@ -430,7 +438,8 @@ mod tests {
     fn json_and_sarif_end_with_single_trailing_newline() {
         // Keeps the three renderers consistent so CLI callers can use
         // `print!` uniformly without double-newline surprises.
-        let report = Report { findings: Vec::new(), files_discovered: 0 };
+        let report =
+            Report { findings: Vec::new(), files_discovered: 0, discovered_files: Vec::new() };
         let json = report.render_json(Path::new(""));
         assert!(json.ends_with('\n'), "json should end with \\n, got {json:?}");
         assert!(!json.ends_with("\n\n"), "json should not end with double \\n, got {json:?}");
@@ -469,6 +478,7 @@ mod tests {
                 },
             ],
             files_discovered: 2,
+            discovered_files: Vec::new(),
         };
         let out = report.render_text(Path::new("/tmp/root"), name_lookup);
         let expected = "\
@@ -482,7 +492,8 @@ tests/test_b.py:3:1: ZR001 conditional-test-logic: test function has conditional
 
     #[test]
     fn text_output_empty_prints_only_summary() {
-        let report = Report { findings: Vec::new(), files_discovered: 0 };
+        let report =
+            Report { findings: Vec::new(), files_discovered: 0, discovered_files: Vec::new() };
         let out = report.render_text(Path::new(""), name_lookup);
         assert_eq!(out, "0 findings in 0 files discovered.\n");
     }
@@ -509,6 +520,7 @@ tests/test_b.py:3:1: ZR001 conditional-test-logic: test function has conditional
                 },
             ],
             files_discovered: 2,
+            discovered_files: Vec::new(),
         };
         let json = report.render_json(Path::new("/tmp/root"));
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -525,7 +537,8 @@ tests/test_b.py:3:1: ZR001 conditional-test-logic: test function has conditional
 
     #[test]
     fn json_output_empty_is_empty_array() {
-        let report = Report { findings: Vec::new(), files_discovered: 0 };
+        let report =
+            Report { findings: Vec::new(), files_discovered: 0, discovered_files: Vec::new() };
         let json = report.render_json(Path::new(""));
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(parsed.as_array().unwrap().is_empty());
@@ -543,6 +556,7 @@ tests/test_b.py:3:1: ZR001 conditional-test-logic: test function has conditional
                 severity: Severity::Warning,
             }],
             files_discovered: 1,
+            discovered_files: Vec::new(),
         };
         let sarif = report.render_sarif(Path::new("/tmp/root"));
         let parsed: serde_json::Value = serde_json::from_str(&sarif).unwrap();
@@ -576,7 +590,8 @@ tests/test_b.py:3:1: ZR001 conditional-test-logic: test function has conditional
         // Proof that `tool.driver.rules` is populated with the full
         // registry — GitHub code-scanning / Sonar consume this to render
         // human-readable titles and long-form descriptions on hover.
-        let report = Report { findings: Vec::new(), files_discovered: 0 };
+        let report =
+            Report { findings: Vec::new(), files_discovered: 0, discovered_files: Vec::new() };
         let sarif = report.render_sarif(Path::new(""));
         let parsed: serde_json::Value = serde_json::from_str(&sarif).unwrap();
         let rules = parsed["runs"][0]["tool"]["driver"]["rules"].as_array().unwrap();
@@ -614,6 +629,7 @@ tests/test_b.py:3:1: ZR001 conditional-test-logic: test function has conditional
                 severity: Severity::Warning,
             }],
             files_discovered: 1,
+            discovered_files: Vec::new(),
         };
         let sarif = report.render_sarif(Path::new("/tmp/root"));
         let parsed: serde_json::Value = serde_json::from_str(&sarif).unwrap();
@@ -624,7 +640,8 @@ tests/test_b.py:3:1: ZR001 conditional-test-logic: test function has conditional
 
     #[test]
     fn sarif_output_empty_has_no_results() {
-        let report = Report { findings: Vec::new(), files_discovered: 0 };
+        let report =
+            Report { findings: Vec::new(), files_discovered: 0, discovered_files: Vec::new() };
         let sarif = report.render_sarif(Path::new(""));
         let parsed: serde_json::Value = serde_json::from_str(&sarif).unwrap();
         assert!(parsed["runs"][0]["results"].as_array().unwrap().is_empty());
@@ -646,6 +663,7 @@ tests/test_b.py:3:1: ZR001 conditional-test-logic: test function has conditional
                 severity: Severity::Warning,
             }],
             files_discovered: 1,
+            discovered_files: Vec::new(),
         };
         let out = report.render_text(Path::new("/tmp/test_bug.py"), name_lookup);
         assert!(

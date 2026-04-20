@@ -8,6 +8,7 @@
 pub mod ast;
 pub mod config;
 pub mod discovery;
+pub mod overview;
 pub mod parse;
 pub mod report;
 pub mod rules;
@@ -20,6 +21,10 @@ use rayon::prelude::*;
 
 pub use config::{Config, RuleConfig};
 pub use discovery::{discover, DiscoveryError};
+pub use overview::{
+    compute_overview, format_overview_json, format_overview_text, FileOverview, OverviewReport,
+    OverviewSummary,
+};
 pub use parse::ParseError;
 pub use report::{Finding, Report, Severity};
 pub use rules::{Context, Rule};
@@ -63,7 +68,12 @@ pub fn lint<P: AsRef<Path>>(paths: &[P], config: &Config) -> Result<Report, Lint
         a.file.cmp(&b.file).then(a.line.cmp(&b.line)).then(a.column.cmp(&b.column))
     });
 
-    Ok(Report { findings, files_discovered })
+    // Sort the discovered files by path so the `overview` subcommand's
+    // clean-file enumeration is deterministic across platforms.
+    let mut discovered_files: Vec<std::path::PathBuf> = files;
+    discovered_files.sort();
+
+    Ok(Report { findings, files_discovered, discovered_files })
 }
 
 fn lint_one_file(
@@ -137,6 +147,31 @@ mod tests {
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].code, "ZR001");
         assert!(report.findings[0].file.ends_with("test_a.py"));
+    }
+
+    #[test]
+    fn lint_populates_discovered_files_sorted_by_path() {
+        // `Report.discovered_files` must list every file `lint()` walked,
+        // sorted lexicographically, so the `overview` subcommand can
+        // enumerate clean files in a stable order regardless of
+        // OS-dependent directory-walk order.
+        let tmp = TempDir::new().unwrap();
+        let tests = tmp.path().join("tests");
+        std::fs::create_dir_all(&tests).unwrap();
+        std::fs::write(tests.join("test_b.py"), "def test_two():\n    assert True\n").unwrap();
+        std::fs::write(tests.join("test_a.py"), "def test_one():\n    assert True\n").unwrap();
+
+        let config = Config::default();
+        let report = lint(&[tmp.path()], &config).unwrap();
+        assert_eq!(report.files_discovered, 2);
+        assert_eq!(report.discovered_files.len(), report.files_discovered);
+        // Sorted by path — test_a before test_b regardless of walk order.
+        let names: Vec<_> = report
+            .discovered_files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["test_a.py".to_string(), "test_b.py".to_string()]);
     }
 
     #[test]

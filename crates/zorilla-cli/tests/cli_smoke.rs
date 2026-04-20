@@ -549,6 +549,107 @@ fn stats_format_json_produces_parseable_output_with_required_keys() {
 }
 
 #[test]
+fn overview_help_mentions_format_and_files_flags() {
+    // `overview --help` advertises the full surface: `--format` and the
+    // two input-plumbing flags it inherits from `check`.
+    let assert =
+        Command::cargo_bin("zorilla").unwrap().arg("overview").arg("--help").assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("--format"), "overview --help missing --format:\n{stdout}");
+    assert!(stdout.contains("--files-from"), "overview --help missing --files-from:\n{stdout}");
+    assert!(stdout.contains("--files"), "overview --help missing --files:\n{stdout}");
+}
+
+#[test]
+fn overview_on_tree_with_findings_prints_filename_findings_and_bullet() {
+    // `NO_COLOR=1` is set in the child env so the assertions below do
+    // not have to cope with ANSI codes — the smoke test pins the
+    // uncoloured bullet character (unicode bullet ●).
+    let tmp = TempDir::new().unwrap();
+    let tests = tmp.path().join("tests");
+    std::fs::create_dir_all(&tests).unwrap();
+    std::fs::write(tests.join("test_a.py"), "def test_x():\n    if True:\n        assert True\n")
+        .unwrap();
+
+    let assert = Command::cargo_bin("zorilla")
+        .unwrap()
+        .env("NO_COLOR", "1")
+        .arg("overview")
+        .arg(tmp.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    // Locate the file's header line — it must contain the filename and
+    // the word `findings`.
+    let header = stdout
+        .lines()
+        .find(|l| l.contains("test_a.py") && l.contains("findings"))
+        .unwrap_or_else(|| panic!("missing file header in overview output:\n{stdout}"));
+    assert!(
+        header.contains("1 findings"),
+        "expected '1 findings' on file header, got: {header:?}\nfull:\n{stdout}"
+    );
+    // Plain bullet (unicode ●) appears on at least one finding line.
+    assert!(stdout.contains('\u{25CF}'), "missing bullet character in:\n{stdout}");
+    // No ANSI escape bytes because NO_COLOR is set.
+    assert!(!stdout.contains('\x1b'), "unexpected ANSI codes despite NO_COLOR:\n{stdout:?}");
+}
+
+#[test]
+fn overview_format_json_parses_with_required_keys() {
+    let tmp = TempDir::new().unwrap();
+    let tests = tmp.path().join("tests");
+    std::fs::create_dir_all(&tests).unwrap();
+    std::fs::write(tests.join("test_a.py"), "def test_x():\n    if True:\n        assert True\n")
+        .unwrap();
+
+    let assert = Command::cargo_bin("zorilla")
+        .unwrap()
+        .env("NO_COLOR", "1")
+        .arg("overview")
+        .arg(tmp.path())
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("overview --format json stdout parses as JSON");
+    for key in ["summary", "files", "clean_files"] {
+        assert!(parsed.get(key).is_some(), "missing key {key} in JSON output:\n{stdout}");
+    }
+    // Files array must carry at least one entry pointing at test_a.py.
+    let files = parsed["files"].as_array().expect("files is an array");
+    assert!(!files.is_empty(), "expected non-empty files array in:\n{stdout}");
+    assert!(
+        files[0]["path"].as_str().unwrap_or("").contains("test_a.py"),
+        "expected first file to be test_a.py, got: {stdout}"
+    );
+    assert_eq!(files[0]["finding_count"], 1);
+}
+
+#[test]
+fn overview_on_empty_directory_is_clean_and_exits_zero() {
+    let tmp = TempDir::new().unwrap();
+
+    let assert = Command::cargo_bin("zorilla")
+        .unwrap()
+        .env("NO_COLOR", "1")
+        .arg("overview")
+        .arg(tmp.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    // No bullets on a clean run — the per-file sections are skipped.
+    assert!(!stdout.contains('\u{25CF}'), "unexpected bullet on empty run:\n{stdout}");
+    // Header still prints with zero counts.
+    assert!(
+        stdout.contains("Overview: 0 files, 0 findings in 0 files"),
+        "missing zero-counts header in:\n{stdout}"
+    );
+}
+
+#[test]
 fn check_on_tree_with_conditional_test_emits_zr001_finding() {
     let tmp = TempDir::new().unwrap();
     let tests = tmp.path().join("tests");

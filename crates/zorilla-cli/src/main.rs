@@ -4,14 +4,15 @@
 //! Exit codes: `0` (clean), `1` (findings), `2` (error).
 
 use std::fmt::Write as _;
-use std::io::BufRead;
+use std::io::{BufRead, IsTerminal as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
 use zorilla_core::{
-    compute_stats, format_stats_json, format_stats_text, lint, rule_name_for, rules, Config,
+    compute_overview, compute_stats, format_overview_json, format_overview_text, format_stats_json,
+    format_stats_text, lint, rule_name_for, rules, Config,
 };
 
 #[derive(Debug, Parser)]
@@ -62,6 +63,24 @@ enum Command {
         #[arg(long = "files", value_name = "PATH")]
         files: Vec<PathBuf>,
     },
+    /// Print a per-file overview of a scan (findings grouped by file,
+    /// with a trailing count of clean files). Always exits 0 — this is
+    /// a report, not a gate.
+    Overview {
+        /// Paths to scan. Defaults to the current directory.
+        #[arg(value_name = "PATH")]
+        paths: Vec<PathBuf>,
+        /// Output format. Stats/overview support `text` and `json`;
+        /// SARIF does not fit per-file overviews.
+        #[arg(long, value_enum, default_value_t = SummaryFormat::Text)]
+        format: SummaryFormat,
+        /// Read paths to scan from this file (one per line). Use "-" to read stdin.
+        #[arg(long, value_name = "FILE")]
+        files_from: Option<PathBuf>,
+        /// Additional path to scan. May be repeated.
+        #[arg(long = "files", value_name = "PATH")]
+        files: Vec<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -100,6 +119,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Explain { code } => Ok(explain(&code)),
         Command::Stats { paths, format, files_from, files } => {
             stats(paths, format, files_from.as_deref(), files)
+        }
+        Command::Overview { paths, format, files_from, files } => {
+            overview(paths, format, files_from.as_deref(), files)
         }
     }
 }
@@ -152,6 +174,44 @@ fn stats(
     };
     print!("{rendered}");
     Ok(ExitCode::SUCCESS)
+}
+
+/// Handle the `overview` subcommand — group findings by file and render
+/// a per-file view. Shares `resolve_inputs` and `load_config_for` with
+/// `check`. Text output uses ANSI color when stdout is a terminal and
+/// the `NO_COLOR` env var is unset (honoring the conventional opt-out
+/// at <https://no-color.org>). Always exits 0 — `overview` is a report,
+/// not a gate.
+fn overview(
+    paths: Vec<PathBuf>,
+    format: SummaryFormat,
+    files_from: Option<&Path>,
+    files: Vec<PathBuf>,
+) -> anyhow::Result<ExitCode> {
+    let paths = resolve_inputs(paths, files, files_from)?;
+    let config = load_config_for(&paths)?;
+
+    let report = lint(&paths, &config).context("running lint")?;
+    let overview = compute_overview(&report);
+    let rendered = match format {
+        SummaryFormat::Text => {
+            let use_color = should_use_color();
+            format_overview_text(&overview, use_color)
+        }
+        SummaryFormat::Json => format_overview_json(&overview),
+    };
+    print!("{rendered}");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Color detection for the `overview` text emitter. Returns `true`
+/// only when stdout is a terminal AND the `NO_COLOR` env var is not
+/// set to a non-empty string — matches <https://no-color.org/>.
+fn should_use_color() -> bool {
+    if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
+        return false;
+    }
+    std::io::stdout().is_terminal()
 }
 
 /// Merge positional paths, `--files` repeats, and `--files-from` lines

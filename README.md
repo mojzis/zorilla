@@ -160,6 +160,36 @@ Add `--format json` to emit a parseable summary (flat counters plus a
 `breakdown` object keyed by rule code). `--files` and `--files-from`
 work the same way they do for `check`.
 
+### Per-file overview
+
+`zorilla overview` groups findings by file. Files are sorted by finding
+count (most-flagged first), and files that produced no findings are
+rolled up into a trailing count — useful when triaging a large repo.
+Like `stats`, it always exits `0` and accepts `--files` / `--files-from`.
+
+```
+$ zorilla overview path/to/tests
+Overview: 12 files, 7 findings in 3 files
+
+tests/test_orders.py  3 findings
+  ● 12:5  ZR003 no-assertion           test has no assertion
+  ● 25:5  ZR001 conditional-test-logic test function has conditional logic (if/for/while/try)
+  ● 25:9  ZR002 sleep-in-test          test calls sleep — wait on a condition instead
+
+tests/test_returns.py  2 findings
+  ● 7:5   ZR003 no-assertion           test has no assertion
+  ● 18:5  ZR003 no-assertion           test has no assertion
+
+9 clean files not shown.
+```
+
+The bullet (`●`) is coloured by severity — yellow for warnings, red for
+errors — when stdout is a terminal. `overview` honours the [`NO_COLOR`
+convention](https://no-color.org/), and emits plain bullets when output
+is piped or redirected. Add `--format json` to get the same data as a
+structured document (`summary`, `files`, `clean_files`) suitable for
+dashboards or scripting.
+
 ### List and explain
 
 ```

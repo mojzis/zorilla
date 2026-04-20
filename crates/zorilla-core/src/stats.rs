@@ -157,7 +157,8 @@ mod tests {
 
     #[test]
     fn empty_report_produces_zero_stats_with_every_rule_seeded() {
-        let report = Report { findings: Vec::new(), files_discovered: 0 };
+        let report =
+            Report { findings: Vec::new(), files_discovered: 0, discovered_files: Vec::new() };
         let stats = compute_stats(&report);
         assert_eq!(stats.files_scanned, 0);
         assert_eq!(stats.files_with_findings, 0);
@@ -188,6 +189,7 @@ mod tests {
                 finding("ZR002", "tests/test_b.py", 3),
             ],
             files_discovered: 3,
+            discovered_files: Vec::new(),
         };
         let stats = compute_stats(&report);
 
@@ -212,6 +214,7 @@ mod tests {
                 finding("ZR003", "tests/test_a.py", 6),
             ],
             files_discovered: 2,
+            discovered_files: Vec::new(),
         };
         let stats = compute_stats(&report);
         let text = format_stats_text(&stats);
@@ -246,8 +249,11 @@ mod tests {
         // The numeric column across the four summary rows must line up.
         // Locate the count on each row (last whitespace-split token) and
         // record where it starts; all four starts must be equal.
-        let report =
-            Report { findings: vec![finding("ZR001", "tests/test_a.py", 2)], files_discovered: 10 };
+        let report = Report {
+            findings: vec![finding("ZR001", "tests/test_a.py", 2)],
+            files_discovered: 10,
+            discovered_files: Vec::new(),
+        };
         let stats = compute_stats(&report);
         let text = format_stats_text(&stats);
         let summary_labels =
@@ -276,6 +282,7 @@ mod tests {
                 finding("ZR003", "tests/test_b.py", 9),
             ],
             files_discovered: 4,
+            discovered_files: Vec::new(),
         };
         let stats = compute_stats(&report);
         let json = format_stats_json(&stats);
