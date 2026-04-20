@@ -148,7 +148,7 @@ fn stats(
     let stats = compute_stats(&report);
     let rendered = match format {
         SummaryFormat::Text => format_stats_text(&stats),
-        SummaryFormat::Json => format_stats_json(&stats).context("formatting stats as JSON")?,
+        SummaryFormat::Json => format_stats_json(&stats),
     };
     print!("{rendered}");
     Ok(ExitCode::SUCCESS)

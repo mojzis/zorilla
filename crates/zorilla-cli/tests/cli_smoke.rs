@@ -478,6 +478,45 @@ fn stats_on_tree_with_findings_reports_nonzero_breakdown_and_exits_zero() {
 }
 
 #[test]
+fn stats_files_from_stdin_actually_lints_listed_paths() {
+    // Regression guard for `stats`'s --files-from plumbing. Mirrors
+    // `check_files_from_stdin_lints_only_listed_files` in spirit: prove
+    // that a path delivered via stdin is actually linted, not silently
+    // dropped. One test covers the invariant without duplicating the
+    // three-mode matrix (`--files`, `--files-from FILE`, `--files-from
+    // -`) the `check` tests pin.
+    let tmp = TempDir::new().unwrap();
+    // Non-test-prefixed so include globs would reject it on a dir walk;
+    // only the explicit-path bypass gets it into the scan.
+    let file = tmp.path().join("scratch.py");
+    std::fs::write(&file, "def test_x():\n    if True:\n        assert True\n").unwrap();
+
+    let assert = Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("stats")
+        .arg("--format")
+        .arg("json")
+        .arg("--files-from")
+        .arg("-")
+        .write_stdin(format!("{}\n", file.display()))
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stats --format json stdout parses as JSON");
+    // Evidence: the stdin-supplied path was actually linted — the file
+    // contains a ZR001 violation, so the breakdown for ZR001 must read
+    // non-zero. A regression where `stats` ignored `--files-from` would
+    // show ZR001 = 0 here.
+    assert_eq!(
+        parsed["breakdown"]["ZR001"].as_u64(),
+        Some(1),
+        "expected ZR001 count of 1 in breakdown, got:\n{stdout}"
+    );
+    assert_eq!(parsed["total_findings"].as_u64(), Some(1), "unexpected total_findings:\n{stdout}");
+}
+
+#[test]
 fn stats_format_json_produces_parseable_output_with_required_keys() {
     let tmp = TempDir::new().unwrap();
     let tests = tmp.path().join("tests");

@@ -16,7 +16,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use anyhow::Context as _;
 use serde::Serialize;
 
 use crate::report::Report;
@@ -83,38 +82,15 @@ pub fn format_stats_text(stats: &ScanStats) -> String {
     // the longest of the four — pin to that width explicitly so a
     // future renamed label doesn't silently lose alignment.
     let label_width = "Files with findings:".len();
-    writeln!(
-        out,
-        "  {:<label_width$}  {}",
-        "Files scanned:",
-        stats.files_scanned,
-        label_width = label_width
-    )
-    .ok();
-    writeln!(
-        out,
-        "  {:<label_width$}  {}",
-        "Files with findings:",
-        stats.files_with_findings,
-        label_width = label_width
-    )
-    .ok();
-    writeln!(
-        out,
-        "  {:<label_width$}  {}",
-        "Clean files:",
-        stats.clean_files,
-        label_width = label_width
-    )
-    .ok();
-    writeln!(
-        out,
-        "  {:<label_width$}  {}",
-        "Total findings:",
-        stats.total_findings,
-        label_width = label_width
-    )
-    .ok();
+    // Writing to `String` is infallible; `let _ = writeln!(...)` mirrors
+    // the idiom used in `list_rules`/`Report::render_text`.
+    let mut write_row = |label: &str, count: usize| {
+        let _ = writeln!(out, "  {label:<label_width$}  {count}");
+    };
+    write_row("Files scanned:", stats.files_scanned);
+    write_row("Files with findings:", stats.files_with_findings);
+    write_row("Clean files:", stats.clean_files);
+    write_row("Total findings:", stats.total_findings);
 
     out.push('\n');
     out.push_str("Breakdown by rule:\n");
@@ -132,7 +108,7 @@ pub fn format_stats_text(stats: &ScanStats) -> String {
         .collect();
     let rule_label_width = labels.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
     for (label, count) in labels {
-        writeln!(out, "  {label:<rule_label_width$}  {count}").ok();
+        let _ = writeln!(out, "  {label:<rule_label_width$}  {count}");
     }
 
     out
@@ -143,10 +119,22 @@ pub fn format_stats_text(stats: &ScanStats) -> String {
 /// The output shape matches `cf/.../context.md`: flat keys for the four
 /// counters and an ordered `breakdown` object. `serde_json` preserves
 /// the `BTreeMap` ordering so rule codes appear in ascending order.
-pub fn format_stats_json(stats: &ScanStats) -> anyhow::Result<String> {
-    let mut out = serde_json::to_string_pretty(stats).context("serializing stats to JSON")?;
+///
+/// `serde_json::to_string_pretty` over [`ScanStats`] cannot fail at
+/// runtime — every field is `usize` / `String` / `BTreeMap<String,
+/// usize>` with no custom `Serialize`, no non-string map key, and no
+/// float. Returns `String` (not `Result<String>`) to match the sibling
+/// [`Report::render_json`] / [`Report::render_sarif`] renderers, which
+/// solve the same infallibility argument the same way.
+///
+/// [`Report::render_json`]: crate::report::Report::render_json
+/// [`Report::render_sarif`]: crate::report::Report::render_sarif
+#[must_use]
+pub fn format_stats_json(stats: &ScanStats) -> String {
+    let mut out = serde_json::to_string_pretty(stats)
+        .expect("ScanStats serializes infallibly; see format_stats_json invariants");
     out.push('\n');
-    Ok(out)
+    out
 }
 
 #[cfg(test)]
@@ -290,7 +278,7 @@ mod tests {
             files_discovered: 4,
         };
         let stats = compute_stats(&report);
-        let json = format_stats_json(&stats).unwrap();
+        let json = format_stats_json(&stats);
         assert!(json.ends_with('\n'), "json must end in newline, got {json:?}");
 
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
