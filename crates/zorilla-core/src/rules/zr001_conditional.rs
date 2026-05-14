@@ -15,16 +15,24 @@
 //!
 //! ## Refinements
 //!
-//! Three patterns look like control flow to a naive walk but read as
+//! Four patterns look like control flow to a naive walk but read as
 //! linear test code in practice and are therefore exempted:
 //!
 //! - **`try` / `finally` without `except`** — pure cleanup, not
 //!   branching. Only `try` blocks that contain at least one
 //!   `except_clause` fire.
-//! - **`for` over bare or helper-only asserts** — a parametrize-by-loop
-//!   pattern (`for case in cases: assert case.ok`) where the loop body's
-//!   top-level statements are all `assert_statement` or assertion-helper
-//!   calls. Empty / non-pure for-loops still fire.
+//! - **`for` over asserts (with optional intervening assignments)** — a
+//!   parametrize-by-loop pattern (`for case in cases: assert case.ok`,
+//!   or `for m in months: s = compute(m); assert s == 0`) where the
+//!   loop body has at least one assert-bearing statement, plain
+//!   `assignment` / `augmented_assignment` interleaved, and no control
+//!   flow anywhere inside. Helper-call asserts (`self.assertEqual(...)`)
+//!   count alongside bare `assert`s.
+//! - **`for` of pure side-effect calls inside an assertless test** — a
+//!   mis-named fixture (`def test_env(): ...; for k in KEYS:
+//!   os.environ.pop(k)`) is doing cleanup, not branching. When the
+//!   enclosing test body has zero asserts anywhere and the loop body
+//!   contains only call statements or assignments, the loop is exempt.
 //! - **Control flow inside a nested `def` or `lambda` within the test** —
 //!   the outer test's control flow is the only concern. A helper
 //!   defined inline can have whatever structure it needs.
@@ -56,7 +64,7 @@ use std::ops::ControlFlow;
 
 use tree_sitter::Node;
 
-use crate::ast::{call_final_name, iter_test_functions, walk_descendants_pruned};
+use crate::ast::{call_final_name, has_any_assert, iter_test_functions, walk_descendants_pruned};
 use crate::report::{Finding, Severity};
 use crate::rules::{Context, Rule};
 
@@ -88,7 +96,17 @@ impl Rule for ConditionalRule {
             let Some(body) = test_fn.child_by_field_name("body") else {
                 continue;
             };
-            if let Some(offender) = find_first_conditional(body, ctx.source, helpers) {
+            // Pre-compute whether the enclosing test function body contains
+            // *any* assert-shaped construct anywhere. The cleanup-loop
+            // downgrade ([`for_body_is_pure_cleanup_in_assertless_test`])
+            // only applies when this is `false` — a `for` over plain calls
+            // is exempt only inside a mis-named "fixture" test that does no
+            // asserting at all (e.g. alma's `def test_env(): ...; for k in
+            // KEYS: os.environ.pop(k)`).
+            let test_body_has_asserts = has_any_assert(body, ctx.source, helpers);
+            if let Some(offender) =
+                find_first_conditional(body, ctx.source, helpers, test_body_has_asserts)
+            {
                 let start = offender.start_position();
                 out.push(Finding {
                     code: self.code(),
@@ -110,20 +128,28 @@ impl Rule for ConditionalRule {
 /// subtrees — the outer test's control flow is what the rule cares
 /// about; an inline helper's internal structure isn't.
 ///
-/// Three refinements rule out look-alikes:
+/// Four refinements rule out look-alikes:
 /// - `try_statement` only fires when it has at least one `except_clause`
 ///   ([`has_except_clause`]). A `try` / `finally` with no `except` is
 ///   cleanup, not branching.
-/// - `for_statement` is skipped when its body's top-level statements
-///   are all `assert_statement` or known assertion-helper calls
-///   ([`for_body_is_only_asserts`]). That's a parametrize-substitute,
-///   not branching.
+/// - `for_statement` is skipped when its body matches
+///   [`for_body_is_only_asserts`]: at least one assert-bearing
+///   statement, with only plain assignments interleaved and no control
+///   flow at any nesting level. That's a parametrize-substitute, not
+///   branching.
+/// - `for_statement` is also skipped — only when the enclosing test
+///   body contains no asserts anywhere — by
+///   [`for_body_is_pure_cleanup`]: a loop of plain call statements /
+///   assignments inside a mis-named fixture-shaped test. Caller passes
+///   `test_body_has_asserts` so this downgrade is disabled the moment
+///   any assert appears in the enclosing test.
 /// - `if_statement` and `while_statement` always fire when found at the
 ///   outer scope.
 fn find_first_conditional<'tree>(
     body: Node<'tree>,
     source: &str,
     helpers: &HashSet<String>,
+    test_body_has_asserts: bool,
 ) -> Option<Node<'tree>> {
     let result = walk_descendants_pruned(
         body,
@@ -139,6 +165,13 @@ fn find_first_conditional<'tree>(
             }
             "for_statement" => {
                 if for_body_is_only_asserts(node, source, helpers) {
+                    ControlFlow::Continue(())
+                } else if !test_body_has_asserts && for_body_is_pure_cleanup(node) {
+                    // The enclosing test function has no asserts anywhere —
+                    // it's a mis-named fixture using a loop purely to set
+                    // up / tear down state. Treat the loop as cleanup, not
+                    // branching. Scope is deliberately narrow: any assert
+                    // in the test body disables this downgrade.
                     ControlFlow::Continue(())
                 } else {
                     ControlFlow::Break(node)
@@ -162,48 +195,164 @@ fn has_except_clause(try_node: Node<'_>) -> bool {
     found
 }
 
-/// Does the body of `for_node` consist solely of bare/message
-/// `assert_statement`s or `expression_statement`s wrapping a call
-/// whose final identifier is in `helpers`?
+/// Does the body of `for_node` consist of assertion-bearing statements
+/// — bare/message `assert_statement`s, or assertion-helper calls — with
+/// **simple assignments allowed in between** and no control-flow nodes?
 ///
 /// This is the parametrize-by-loop pattern (`for case in cases: assert
-/// case.ok`) — semantically the same as a parametrized test. The walk
-/// only inspects the loop's **top-level** statements; a nested
-/// conditional inside an assert expression would not appear here as a
-/// statement-kind child and is not considered.
+/// case.ok`) and its close relatives where the body computes a local
+/// before asserting on it (`for m in months: s = compute(m); assert s
+/// == 0`). Semantically still "every iteration is one logical case" —
+/// not branching.
 ///
-/// Returns `false` for empty bodies (no named children). An empty
-/// loop is still a loop and should still fire — the brief is
-/// explicit on this point.
+/// Rules (all must hold):
+/// - body has at least one named child (empty bodies still fire),
+/// - body contains at least one assertion-bearing statement,
+/// - every named child is either an assertion-bearing statement or a
+///   plain `assignment` / `augmented_assignment` (wrapped in an
+///   `expression_statement` by tree-sitter Python),
+/// - body contains no control-flow node (`if_statement`,
+///   `while_statement`, nested `for_statement`, `try_statement`) at any
+///   nesting level.
+///
+/// The control-flow ban is enforced via a second pass over the body's
+/// descendants because a top-level-only check would miss things like a
+/// nested `if` inside an inner expression-statement that wraps an
+/// assignment.
 fn for_body_is_only_asserts(for_node: Node<'_>, source: &str, helpers: &HashSet<String>) -> bool {
     let Some(body) = for_node.child_by_field_name("body") else {
         return false;
     };
     let mut cursor = body.walk();
-    let mut children = body.named_children(&mut cursor).peekable();
+    let children: Vec<Node<'_>> = body.named_children(&mut cursor).collect();
     // An empty body is not exempt — `for x in xs: pass` is still a loop.
-    if children.peek().is_none() {
+    if children.is_empty() {
         return false;
     }
-    children.all(|child| match child.kind() {
-        "assert_statement" => true,
+
+    // Reject if any nested statement is control flow. The walk descends
+    // through everything *except* nested function/lambda bodies — a
+    // helper defined inline can have whatever structure it needs.
+    if loop_body_has_control_flow(body) {
+        return false;
+    }
+
+    let mut has_assertion = false;
+    for child in &children {
+        match classify_assert_or_assignment(*child, source, helpers) {
+            BodyStatement::Assertion => has_assertion = true,
+            BodyStatement::Assignment => {}
+            BodyStatement::Other => return false,
+        }
+    }
+    has_assertion
+}
+
+/// Does the body of `for_node` look like pure cleanup — only call
+/// expressions or assignments, no asserts, no control flow?
+///
+/// Only valid when the *enclosing test function* contains no asserts
+/// anywhere (caller's responsibility — see `find_first_conditional`).
+/// The combination "test-named function with zero asserts + loop of
+/// plain side-effect calls" is the mis-named-fixture shape (alma
+/// `tests/conftest.py:25`'s `def test_env(): ...; for k in KEYS:
+/// os.environ.pop(k)`), not branching logic.
+///
+/// Rules:
+/// - body has at least one named child,
+/// - every named child is an `expression_statement` wrapping a `call`,
+///   or an `assignment` / `augmented_assignment`,
+/// - body contains no control-flow node anywhere.
+fn for_body_is_pure_cleanup(for_node: Node<'_>) -> bool {
+    let Some(body) = for_node.child_by_field_name("body") else {
+        return false;
+    };
+    let mut cursor = body.walk();
+    let children: Vec<Node<'_>> = body.named_children(&mut cursor).collect();
+    if children.is_empty() {
+        return false;
+    }
+    if loop_body_has_control_flow(body) {
+        return false;
+    }
+    children.iter().all(|child| match child.kind() {
         "expression_statement" => {
-            // An `expression_statement` wraps exactly one expression.
-            // We want it to be a `call` whose final identifier is a
-            // known assertion helper.
             let Some(inner) = child.named_child(0) else {
                 return false;
             };
-            if inner.kind() != "call" {
-                return false;
-            }
-            let Some(name) = call_final_name(inner, source) else {
-                return false;
-            };
-            helpers.contains(name)
+            matches!(inner.kind(), "call" | "assignment" | "augmented_assignment")
         }
+        // Bare `assignment` / `augmented_assignment` at statement position
+        // already lives inside an `expression_statement` in tree-sitter
+        // Python, but accept the unwrapped form for robustness.
+        "assignment" | "augmented_assignment" => true,
+        // Anything else (including `assert_statement` — though this
+        // helper is only invoked when the enclosing test has zero
+        // asserts) disqualifies the loop from the cleanup downgrade.
         _ => false,
     })
+}
+
+/// Classification used by [`for_body_is_only_asserts`] for each
+/// top-level statement of the loop body.
+enum BodyStatement {
+    /// Bare/message `assert_statement` or `expression_statement` wrapping
+    /// a call to a known assertion helper.
+    Assertion,
+    /// `expression_statement` wrapping `assignment` / `augmented_assignment`
+    /// (or, defensively, the unwrapped form).
+    Assignment,
+    /// Anything else — fails the "only asserts/assignments" check.
+    Other,
+}
+
+fn classify_assert_or_assignment(
+    node: Node<'_>,
+    source: &str,
+    helpers: &HashSet<String>,
+) -> BodyStatement {
+    match node.kind() {
+        "assert_statement" => BodyStatement::Assertion,
+        "expression_statement" => {
+            let Some(inner) = node.named_child(0) else {
+                return BodyStatement::Other;
+            };
+            match inner.kind() {
+                "call" => {
+                    let Some(name) = call_final_name(inner, source) else {
+                        return BodyStatement::Other;
+                    };
+                    if helpers.contains(name) {
+                        BodyStatement::Assertion
+                    } else {
+                        BodyStatement::Other
+                    }
+                }
+                "assignment" | "augmented_assignment" => BodyStatement::Assignment,
+                _ => BodyStatement::Other,
+            }
+        }
+        "assignment" | "augmented_assignment" => BodyStatement::Assignment,
+        _ => BodyStatement::Other,
+    }
+}
+
+/// Does any descendant of `body` (skipping nested `function_definition`
+/// / `lambda` subtrees) carry a control-flow kind name? Used by both
+/// for-body downgrades to refuse loops with `if`/`while`/`for`/`try`
+/// inside them.
+fn loop_body_has_control_flow(body: Node<'_>) -> bool {
+    walk_descendants_pruned(
+        body,
+        |n| !matches!(n.kind(), "function_definition" | "lambda"),
+        |node| match node.kind() {
+            "if_statement" | "while_statement" | "for_statement" | "try_statement" => {
+                ControlFlow::Break(())
+            }
+            _ => ControlFlow::Continue(()),
+        },
+    )
+    .is_break()
 }
 
 #[cfg(test)]
@@ -439,15 +588,39 @@ def test_each_case():
     }
 
     #[test]
-    fn fires_on_for_loop_with_real_logic_alongside_asserts() {
-        // A non-assert top-level statement (`y = ...` assignment) means
-        // the loop is doing real work, not just iterating through
-        // assertions. Still fires.
+    fn does_not_fire_on_for_loop_with_assignment_then_assert() {
+        // SEMANTICS CHANGE: previously
+        // `fires_on_for_loop_with_real_logic_alongside_asserts` asserted
+        // that an assignment between iterations broke the
+        // for-of-asserts shape and re-fired. Run-2 against real
+        // corpora flagged this as a false positive (klice
+        // `test_backtest.py:32`, biston `test_injector.py:167`,
+        // …): `for m in months: s = compute(m); assert s == 0` is
+        // still a parametrize-by-loop — every iteration computes one
+        // local and asserts on it. As long as the body has at least
+        // one assert-bearing statement, no control flow, and only
+        // assignments interleaved, it stays exempt.
         let src = "\
 def test_each_case():
     for case in CASES:
         y = transform(case)
         assert y
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_for_loop_with_control_flow_inside() {
+        // The broadened for-of-asserts downgrade is gated on the loop
+        // body containing no control flow at any nesting level. A
+        // nested `if` inside the body disqualifies the loop — the rule
+        // reports the `for_statement` itself (which is what's wrong
+        // here), not the nested `if`.
+        let src = "\
+def test_each_case():
+    for case in CASES:
+        if case:
+            assert case == 1
 ";
         let out = run(src);
         assert_eq!(out.len(), 1);
@@ -455,17 +628,37 @@ def test_each_case():
     }
 
     #[test]
-    fn fires_on_for_loop_calling_unknown_helper() {
-        // A call to something that isn't in the helpers set is not a
-        // recognised assertion form, so the body isn't "only asserts".
+    fn does_not_fire_on_for_loop_calling_unknown_helper_in_assertless_test() {
+        // SEMANTICS CHANGE: previously
+        // `fires_on_for_loop_calling_unknown_helper` asserted that a
+        // loop of plain calls fires. The cleanup-loop downgrade now
+        // exempts loops of plain calls *when the enclosing test
+        // function has no asserts anywhere* — that's the
+        // mis-named-fixture shape (alma `tests/conftest.py:25`'s
+        // `def test_env(): ...; for k in KEYS: os.environ.pop(k)`).
         let src = "\
 def test_each_case():
     for case in CASES:
         process(case)
 ";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_for_loop_calling_unknown_helper_in_test_with_asserts() {
+        // Counter-case to `does_not_fire_on_for_loop_calling_unknown_helper_in_assertless_test`:
+        // the cleanup downgrade is disabled the moment any assert
+        // appears in the test body. A loop of plain calls is still a
+        // for_statement with non-assertion content — fires.
+        let src = "\
+def test_does_real_work():
+    assert True
+    for case in CASES:
+        process(case)
+";
         let out = run(src);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].line, 2);
+        assert_eq!(out[0].line, 3);
     }
 
     #[test]
