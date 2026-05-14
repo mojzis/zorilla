@@ -447,6 +447,27 @@ fn collect_chain_into<'a>(node: Node<'_>, source: &'a str, out: &mut Vec<&'a str
     }
 }
 
+/// Climb past any `parenthesized_expression` wrappers around `node`,
+/// returning the outermost equivalent expression.
+///
+/// Useful for rule predicates that need to recognise a syntactic position
+/// regardless of paren-wrapping — `assert exists(p), ("/x")` and
+/// `mock.return_value = ("/x")` should be treated the same as their
+/// unparenthesised forms. Returns `node` unchanged when it has no
+/// `parenthesized_expression` parent.
+#[must_use]
+pub fn climb_past_parens(node: Node<'_>) -> Node<'_> {
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        if parent.kind() == "parenthesized_expression" {
+            current = parent;
+        } else {
+            break;
+        }
+    }
+    current
+}
+
 /// Does `with_node` carry a `with_item` whose value is a call whose
 /// function's final name is `raises` or `warns`?
 fn with_statement_is_raises_or_warns(with_node: Node<'_>, source: &str) -> bool {
@@ -758,6 +779,46 @@ def test_x():
             "subscripted decorator must return an empty Vec, got {:?}",
             decorator_chain_segments(decorator, src)
         );
+    }
+
+    #[test]
+    fn climb_past_parens_unwraps_nested_parentheses() {
+        // The literal "x" sits inside `(("x"))` — two layers of
+        // `parenthesized_expression`. `climb_past_parens` must walk through
+        // both and stop at the outer `assignment` parent's right-hand side.
+        let src = "x = ((\"value\"))\n";
+        let tree = parse(src).unwrap();
+        let mut string_node: Option<Node<'_>> = None;
+        let _ = walk_descendants::<()>(tree.root_node(), |n| {
+            if n.kind() == "string" {
+                string_node = Some(n);
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        });
+        let string_node = string_node.expect("source has a string");
+        let outer = climb_past_parens(string_node);
+        // After climbing past both parens, the parent should be the
+        // `assignment` node — not another `parenthesized_expression`.
+        assert_eq!(outer.kind(), "parenthesized_expression");
+        assert_eq!(outer.parent().map(|p| p.kind()), Some("assignment"));
+    }
+
+    #[test]
+    fn climb_past_parens_returns_node_when_no_paren_parent() {
+        let src = "x = \"value\"\n";
+        let tree = parse(src).unwrap();
+        let mut string_node: Option<Node<'_>> = None;
+        let _ = walk_descendants::<()>(tree.root_node(), |n| {
+            if n.kind() == "string" {
+                string_node = Some(n);
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        });
+        let string_node = string_node.expect("source has a string");
+        let result = climb_past_parens(string_node);
+        assert_eq!(result.id(), string_node.id());
     }
 
     #[test]

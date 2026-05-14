@@ -66,7 +66,9 @@ use std::ops::ControlFlow;
 
 use tree_sitter::Node;
 
-use crate::ast::{decorator_chain_segments, iter_test_functions, walk_descendants};
+use crate::ast::{
+    climb_past_parens, decorator_chain_segments, iter_test_functions, walk_descendants,
+};
 use crate::report::{Finding, Severity};
 use crate::rules::{Context, Rule};
 
@@ -369,14 +371,7 @@ fn is_assert_message(string_node: Node<'_>) -> bool {
     // Climb out of any `parenthesized_expression` wrappers, tracking the
     // outermost expression so we can identify it as the assert's second
     // named child.
-    let mut current = string_node;
-    while let Some(parent) = current.parent() {
-        if parent.kind() == "parenthesized_expression" {
-            current = parent;
-        } else {
-            break;
-        }
-    }
+    let current = climb_past_parens(string_node);
     let Some(parent) = current.parent() else {
         return false;
     };
@@ -408,14 +403,7 @@ fn is_assert_message(string_node: Node<'_>) -> bool {
 /// matches.
 fn is_in_mock_attribute_assignment_rhs(string_node: Node<'_>, source: &str) -> bool {
     // Climb past parentheses so `mock.return_value = ("...")` matches.
-    let mut current = string_node;
-    while let Some(parent) = current.parent() {
-        if parent.kind() == "parenthesized_expression" {
-            current = parent;
-        } else {
-            break;
-        }
-    }
+    let current = climb_past_parens(string_node);
     let Some(parent) = current.parent() else {
         return false;
     };
@@ -464,14 +452,7 @@ fn is_in_response_headers_membership_check(string_node: Node<'_>, source: &str) 
     // Climb past any `parenthesized_expression` wrappers so
     // `assert ("/x") in resp.headers["L"]` matches the same as the bare
     // form.
-    let mut current = string_node;
-    while let Some(parent) = current.parent() {
-        if parent.kind() == "parenthesized_expression" {
-            current = parent;
-        } else {
-            break;
-        }
-    }
+    let current = climb_past_parens(string_node);
     let Some(comparison) = current.parent() else {
         return false;
     };
@@ -1138,6 +1119,29 @@ def test_uses_url_inline():
         let out = run(src);
         assert_eq!(out.len(), 1);
         assert!(out[0].message.contains("https://github.com/owner/repo"));
+    }
+
+    #[test]
+    fn fires_on_headers_membership_check_outside_assert() {
+        // Lock in the `assert_statement` guard inside
+        // `is_in_response_headers_membership_check`. The carve-out is
+        // scoped *exactly* to membership checks that are the asserted
+        // expression of an `assert_statement`. A bare `if "/x" in
+        // resp.headers["L"]:` reuses the same `comparison_operator` shape
+        // but is NOT an assertion — the literal should still fire.
+        //
+        // Without this test, a future refactor that drops the assert-
+        // statement check would silently widen the carve-out and only
+        // corpus testing would catch the regression.
+        let src = "\
+def test_inline_membership():
+    resp = client.get(\"/login\")
+    if \"/dashboard\" in resp.headers[\"location\"]:
+        handle()
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].message.contains("/dashboard"));
     }
 
     #[test]
