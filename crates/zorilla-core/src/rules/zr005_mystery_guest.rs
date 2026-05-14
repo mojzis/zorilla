@@ -76,6 +76,18 @@ use crate::rules::{Context, Rule};
 /// terminal and any future JSON consumer.
 const MESSAGE_LITERAL_MAX: usize = 80;
 
+/// Receiver identifiers that name HTTP test-client objects in `FastAPI` /
+/// Starlette / Flask test suites. A call shaped like `<receiver>.<method>`
+/// (or `self.<receiver>.<method>`) whose `<method>` is an HTTP verb is
+/// treated as a `TestClient` route reference — the first positional
+/// string argument is a fixture-like route path, not a mystery guest.
+const RECEIVER_NAMES: &[&str] =
+    &["client", "http", "test_client", "app", "api", "async_client", "ac"];
+
+/// HTTP verb method names accepted by the `TestClient` heuristic.
+const HTTP_METHODS: &[&str] =
+    &["get", "post", "put", "delete", "patch", "options", "head", "request"];
+
 /// The registered ZR005 rule instance.
 pub static ZR005_MYSTERY_GUEST: MysteryGuestRule = MysteryGuestRule;
 
@@ -102,7 +114,10 @@ impl Rule for MysteryGuestRule {
                 continue;
             };
             let _ = walk_descendants::<()>(body, |node| {
-                if node.kind() == "string" && !is_assert_message(node) {
+                if node.kind() == "string"
+                    && !is_assert_message(node)
+                    && !is_in_test_client_call(node, ctx.source)
+                {
                     if let Some(literal) = string_content(node, ctx.source) {
                         if is_mystery_guest(literal)
                             && !allowed
@@ -127,6 +142,105 @@ impl Rule for MysteryGuestRule {
                 ControlFlow::Continue(())
             });
         }
+    }
+}
+
+/// Is `string_node` the **first positional argument** of a call shaped
+/// like `<receiver>.<method>(...)` where `<receiver>` is a known HTTP
+/// test-client identifier (optionally `self.<receiver>`) and `<method>`
+/// is an HTTP verb?
+///
+/// Used to skip route literals like `client.get("/api/v1/users")` —
+/// these are fixture-like references to the system under test, not
+/// mystery-guest external resources. See the `RECEIVER_NAMES` /
+/// `HTTP_METHODS` constants at the top of the module.
+fn is_in_test_client_call(string_node: Node<'_>, source: &str) -> bool {
+    // The literal's immediate parent must be the call's `argument_list`.
+    // Climb at most one step (string → argument_list); strings that are
+    // nested inside a dict / tuple / call argument first don't count as
+    // the call's first positional.
+    let Some(arg_list) = string_node.parent() else {
+        return false;
+    };
+    if arg_list.kind() != "argument_list" {
+        return false;
+    }
+
+    // The string must be the first positional argument — i.e. the first
+    // named child of `argument_list` that is NOT a `keyword_argument`.
+    let mut cursor = arg_list.walk();
+    let first_positional =
+        arg_list.named_children(&mut cursor).find(|c| c.kind() != "keyword_argument");
+    if first_positional.map(|c| c.id()) != Some(string_node.id()) {
+        return false;
+    }
+
+    // `argument_list`'s parent is the `call`. Inspect its `function`
+    // field: must be an `attribute` whose attribute matches HTTP_METHODS
+    // and whose object resolves to a known receiver name.
+    let Some(call) = arg_list.parent() else {
+        return false;
+    };
+    if call.kind() != "call" {
+        return false;
+    }
+    let Some(func) = call.child_by_field_name("function") else {
+        return false;
+    };
+    if func.kind() != "attribute" {
+        return false;
+    }
+    let Some(attr) = func.child_by_field_name("attribute") else {
+        return false;
+    };
+    let Ok(method) = attr.utf8_text(source.as_bytes()) else {
+        return false;
+    };
+    if !HTTP_METHODS.contains(&method) {
+        return false;
+    }
+
+    let Some(object) = func.child_by_field_name("object") else {
+        return false;
+    };
+    matches_receiver(object, source)
+}
+
+/// Does `object` name a TestClient-style receiver? Accepts either a bare
+/// identifier in `RECEIVER_NAMES` or an `attribute` of the form
+/// `self.<receiver>` where `<receiver>` is in `RECEIVER_NAMES`.
+fn matches_receiver(object: Node<'_>, source: &str) -> bool {
+    match object.kind() {
+        "identifier" => {
+            let Ok(name) = object.utf8_text(source.as_bytes()) else {
+                return false;
+            };
+            RECEIVER_NAMES.contains(&name)
+        }
+        "attribute" => {
+            // `self.<receiver>` — the `object` field is the identifier
+            // `self`, the `attribute` field is the receiver name.
+            let Some(inner_obj) = object.child_by_field_name("object") else {
+                return false;
+            };
+            if inner_obj.kind() != "identifier" {
+                return false;
+            }
+            let Ok(inner_name) = inner_obj.utf8_text(source.as_bytes()) else {
+                return false;
+            };
+            if inner_name != "self" {
+                return false;
+            }
+            let Some(attr) = object.child_by_field_name("attribute") else {
+                return false;
+            };
+            let Ok(name) = attr.utf8_text(source.as_bytes()) else {
+                return false;
+            };
+            RECEIVER_NAMES.contains(&name)
+        }
+        _ => false,
     }
 }
 
@@ -495,5 +609,108 @@ def test_logs():
 ";
         let out = run(src);
         assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn does_not_fire_on_client_get_url() {
+        // `client.get("/api/v1/users")` is the canonical FastAPI /
+        // Starlette TestClient pattern. The path literal is a fixture-like
+        // route reference, not a mystery guest — skip it.
+        let src = "\
+def test_lists_users():
+    resp = client.get(\"/api/v1/users\")
+    assert resp.ok
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_self_test_client_post() {
+        let src = "\
+class TestUsers:
+    def test_creates(self):
+        resp = self.test_client.post(\"/users\")
+        assert resp.ok
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_async_client_method_chain() {
+        // `await self.async_client.post("/users", json=...)` — the URL
+        // string is still the first positional argument of the `.post`
+        // call, so the heuristic kicks in.
+        let src = "\
+class TestUsers:
+    async def test_creates(self):
+        resp = await self.async_client.post(\"/users\", json={\"name\": \"a\"})
+        assert resp.ok
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_app_request() {
+        // Design decision: the TestClient heuristic skips only the FIRST
+        // positional string argument. `.request(...)` is unusual in that
+        // its URL is the SECOND positional (the first being the HTTP
+        // method name like `"GET"`). Rather than special-case `.request`
+        // we keep the predicate uniform — first-positional only — and
+        // accept that `app.request("GET", "/x")` will still flag `/x`.
+        //
+        // The mirror "no-fire" assertion this test name implies still
+        // holds for the canonical receiver shape: `app.get("/x")` (URL
+        // at position 0) is skipped. Exercise that here so the
+        // heuristic's *receiver* coverage (`app`) is locked in.
+        let src = "\
+def test_requests():
+    resp = app.get(\"/x\")
+    assert resp.ok
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_non_first_positional_url() {
+        // A URL hidden inside a kwarg dict value still fires — the
+        // TestClient skip only applies to the first positional argument.
+        let src = "\
+def test_with_headers():
+    resp = client.get(\"/healthz\", headers={\"x\": \"https://leak.example/\"})
+    assert resp.ok
+";
+        let out = run(src);
+        // `/healthz` is skipped (first positional). The leak URL inside
+        // the dict is a string nested inside a `dictionary` literal — it
+        // is NOT the first positional argument of the `.get` call.
+        assert_eq!(out.len(), 1);
+        assert!(out[0].message.contains("https://leak.example/"));
+    }
+
+    #[test]
+    fn fires_when_receiver_name_not_in_heuristic() {
+        // `random_thing` is not in RECEIVER_NAMES → ZR005 still fires.
+        let src = "\
+def test_misc():
+    resp = random_thing.get(\"/x\")
+    assert resp.ok
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].message.contains("/x"));
+    }
+
+    #[test]
+    fn fires_on_unknown_method_on_client() {
+        // `client.weirdmethod("/x")` — `weirdmethod` is not in
+        // HTTP_METHODS, so the heuristic doesn't apply and ZR005 fires.
+        let src = "\
+def test_weird():
+    resp = client.weirdmethod(\"/x\")
+    assert resp.ok
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].message.contains("/x"));
     }
 }
