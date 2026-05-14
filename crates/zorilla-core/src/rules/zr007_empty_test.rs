@@ -44,7 +44,7 @@
 
 use tree_sitter::Node;
 
-use crate::ast::iter_test_functions;
+use crate::ast::{decorator_chain_segments, iter_test_functions};
 use crate::report::{Finding, Severity};
 use crate::rules::{Context, Rule};
 
@@ -75,6 +75,9 @@ impl Rule for EmptyTestRule {
             let Some(body) = test_fn.child_by_field_name("body") else {
                 continue;
             };
+            if test_has_skip_or_xfail_decorator(test_fn, ctx.source) {
+                continue;
+            }
             if body_is_empty(body) {
                 let start = test_fn.start_position();
                 out.push(Finding {
@@ -88,6 +91,48 @@ impl Rule for EmptyTestRule {
             }
         }
     }
+}
+
+/// Does the test function carry a `@pytest.mark.skip` or
+/// `@pytest.mark.xfail` decorator (call form with kwargs accepted)?
+///
+/// When the test function is decorated, tree-sitter parses the construct
+/// as `decorated_definition` whose children are one or more `decorator`
+/// nodes followed by the `function_definition`. Walk each decorator and
+/// check via [`is_skip_or_xfail_decorator`].
+///
+/// `@pytest.mark.skipif(...)` is **not** matched here — `skipif` is
+/// conditional, so the body is expected to do real work on the
+/// non-skipped path. The check is exact: segments must be exactly
+/// `["pytest", "mark", "skip"]` or `["pytest", "mark", "xfail"]`.
+fn test_has_skip_or_xfail_decorator(test_fn: Node<'_>, source: &str) -> bool {
+    let Some(parent) = test_fn.parent() else {
+        return false;
+    };
+    if parent.kind() != "decorated_definition" {
+        return false;
+    }
+    let mut cursor = parent.walk();
+    for child in parent.named_children(&mut cursor) {
+        if child.kind() == "decorator" && is_skip_or_xfail_decorator(child, source) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Is `decorator` a `@pytest.mark.skip` / `@pytest.mark.xfail` decorator
+/// (bare or call form)?
+///
+/// Matches exactly the three-segment chain `pytest.mark.skip` or
+/// `pytest.mark.xfail`. `@pytest.mark.skipif`, bare `@skip`,
+/// `@unittest.skip`, etc. all return `false`.
+fn is_skip_or_xfail_decorator(decorator: Node<'_>, source: &str) -> bool {
+    let segments = decorator_chain_segments(decorator, source);
+    segments.len() == 3
+        && segments[0] == "pytest"
+        && segments[1] == "mark"
+        && (segments[2] == "skip" || segments[2] == "xfail")
 }
 
 /// Is `body` a [`block`] whose named statement children are all
@@ -274,6 +319,87 @@ class TestThing:
         let src = "\
 async def test_awaits():
     await something()
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_pytest_mark_skip() {
+        let src = "\
+@pytest.mark.skip
+def test_x():
+    pass
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_pytest_mark_xfail() {
+        let src = "\
+@pytest.mark.xfail
+def test_x():
+    pass
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_pytest_mark_skip_call_form_with_reason() {
+        let src = "\
+@pytest.mark.skip(reason=\"todo\")
+def test_x():
+    pass
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_pytest_mark_xfail_call_form_strict() {
+        let src = "\
+@pytest.mark.xfail(strict=True)
+def test_x():
+    pass
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_pytest_mark_skipif() {
+        // `skipif` is conditional — the body is expected to do real work
+        // on the non-skipped path, so an empty body still flags.
+        let src = "\
+@pytest.mark.skipif(True, reason=\"x\")
+def test_x():
+    pass
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].code, "ZR007");
+    }
+
+    #[test]
+    fn fires_on_user_skip_decorator_not_under_pytest_mark() {
+        // A bare `@skip` decorator (one segment) does NOT match the
+        // three-segment `pytest.mark.skip` pattern — fire as usual.
+        let src = "\
+@skip
+def test_x():
+    pass
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].code, "ZR007");
+    }
+
+    #[test]
+    fn does_not_fire_on_pytest_mark_skip_among_other_decorators() {
+        // When a stack contains both an unrelated decorator and a
+        // `@pytest.mark.skip`, the skip still short-circuits.
+        let src = "\
+@pytest.mark.slow
+@pytest.mark.skip(reason=\"todo\")
+def test_x():
+    pass
 ";
         assert!(run(src).is_empty());
     }

@@ -357,6 +357,79 @@ pub fn call_final_name<'a>(call_node: Node<'_>, source: &'a str) -> Option<&'a s
     }
 }
 
+/// Return the dotted attribute-chain segments of a decorator expression.
+///
+/// A Python decorator is a `decorator` node whose first named child is
+/// the expression that names the decorator. That expression is one of:
+///
+/// - an `identifier` (`@skip` → `["skip"]`)
+/// - an `attribute` chain (`@pytest.mark.skip` → `["pytest", "mark", "skip"]`)
+/// - a `call` whose `function` is one of the above
+///   (`@pytest.mark.skip(reason="todo")` → `["pytest", "mark", "skip"]`)
+///
+/// Anything more exotic (subscripts, lambdas, parenthesized expressions)
+/// returns an empty `Vec` — callers that need a specific decorator shape
+/// should match on the returned segment count.
+///
+/// Borrowing: the returned segments are slices into `source`. The helper
+/// is generic across rules — Phase 4 uses it for the ZR007 skip/xfail
+/// gate, future rules can match on any other decorator chain.
+#[must_use]
+pub fn decorator_chain_segments<'a>(decorator_node: Node<'_>, source: &'a str) -> Vec<&'a str> {
+    let mut cursor = decorator_node.walk();
+    let Some(inner) = decorator_node.named_children(&mut cursor).next() else {
+        return Vec::new();
+    };
+    let expr = match inner.kind() {
+        "call" => match inner.child_by_field_name("function") {
+            Some(func) => func,
+            None => return Vec::new(),
+        },
+        _ => inner,
+    };
+    let mut out = Vec::new();
+    if !collect_chain_into(expr, source, &mut out) {
+        return Vec::new();
+    }
+    out
+}
+
+/// Walk an `identifier`/`attribute` chain left-to-right, appending each
+/// segment name to `out`. Returns `false` if the chain contains any
+/// non-attribute/non-identifier node (e.g. a subscript) — caller treats
+/// that as "not a recognizable chain" and clears the result.
+fn collect_chain_into<'a>(node: Node<'_>, source: &'a str, out: &mut Vec<&'a str>) -> bool {
+    match node.kind() {
+        "identifier" => {
+            let Ok(text) = node.utf8_text(source.as_bytes()) else {
+                return false;
+            };
+            out.push(text);
+            true
+        }
+        "attribute" => {
+            // `attribute` has `object` (left side, recursive) and
+            // `attribute` (the rightmost identifier). Walk object first
+            // so segments land in source order.
+            let Some(object) = node.child_by_field_name("object") else {
+                return false;
+            };
+            if !collect_chain_into(object, source, out) {
+                return false;
+            }
+            let Some(attr) = node.child_by_field_name("attribute") else {
+                return false;
+            };
+            let Ok(text) = attr.utf8_text(source.as_bytes()) else {
+                return false;
+            };
+            out.push(text);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Does `with_node` carry a `with_item` whose value is a call whose
 /// function's final name is `raises` or `warns`?
 fn with_statement_is_raises_or_warns(with_node: Node<'_>, source: &str) -> bool {
@@ -554,6 +627,80 @@ def test_outer():
         assert!(!is_assertion_helper_name("assert_css_class_present", None));
         assert!(!is_assertion_helper_name("_assert_invariant", None));
         assert!(!is_assertion_helper_name("assertEqual", None));
+    }
+
+    fn first_decorator(tree: &Tree) -> Node<'_> {
+        let mut found: Option<Node<'_>> = None;
+        let _ = walk_descendants::<()>(tree.root_node(), |n| {
+            if n.kind() == "decorator" {
+                found = Some(n);
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        });
+        found.expect("source must contain a decorator")
+    }
+
+    #[test]
+    fn decorator_chain_segments_handles_pytest_mark_skip() {
+        let src = "\
+@pytest.mark.skip
+def test_x():
+    pass
+";
+        let tree = parse(src).unwrap();
+        let decorator = first_decorator(&tree);
+        assert_eq!(decorator_chain_segments(decorator, src), vec!["pytest", "mark", "skip"]);
+    }
+
+    #[test]
+    fn decorator_chain_segments_handles_pytest_mark_skip_call_form_with_reason() {
+        let src = "\
+@pytest.mark.skip(reason=\"todo\")
+def test_x():
+    pass
+";
+        let tree = parse(src).unwrap();
+        let decorator = first_decorator(&tree);
+        assert_eq!(decorator_chain_segments(decorator, src), vec!["pytest", "mark", "skip"]);
+    }
+
+    #[test]
+    fn decorator_chain_segments_handles_bare_identifier() {
+        let src = "\
+@skip
+def test_x():
+    pass
+";
+        let tree = parse(src).unwrap();
+        let decorator = first_decorator(&tree);
+        assert_eq!(decorator_chain_segments(decorator, src), vec!["skip"]);
+    }
+
+    #[test]
+    fn decorator_chain_segments_handles_bare_identifier_call_form() {
+        // `@skip()` — call whose function is a bare identifier.
+        let src = "\
+@skip()
+def test_x():
+    pass
+";
+        let tree = parse(src).unwrap();
+        let decorator = first_decorator(&tree);
+        assert_eq!(decorator_chain_segments(decorator, src), vec!["skip"]);
+    }
+
+    #[test]
+    fn decorator_chain_segments_handles_two_segment_chain() {
+        // `@mock.patch` — two-segment attribute chain.
+        let src = "\
+@mock.patch
+def test_x():
+    pass
+";
+        let tree = parse(src).unwrap();
+        let decorator = first_decorator(&tree);
+        assert_eq!(decorator_chain_segments(decorator, src), vec!["mock", "patch"]);
     }
 
     #[test]
