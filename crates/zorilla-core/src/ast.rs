@@ -480,8 +480,13 @@ pub fn test_has_skip_or_xfail_decorator(test_fn: Node<'_>, source: &str) -> bool
 
 /// If `maybe_decorated` is a `decorated_definition`, scan its decorators
 /// for any `@pytest.mark.skip` or `@pytest.mark.xfail`.
+///
+/// `pub(crate)` — internal helper for
+/// [`test_has_skip_or_xfail_decorator`]. External rules go through that
+/// entry point so the method-vs-class-vs-`skipif` semantics stay in one
+/// place.
 #[must_use]
-pub fn decorated_definition_has_skip_or_xfail(
+pub(crate) fn decorated_definition_has_skip_or_xfail(
     maybe_decorated: Option<Node<'_>>,
     source: &str,
 ) -> bool {
@@ -507,8 +512,11 @@ pub fn decorated_definition_has_skip_or_xfail(
 /// but a class-level decorator sits on the `class_definition`'s parent
 /// (`decorated_definition`), so we need a handle on the class node
 /// itself.
+///
+/// `pub(crate)` — generic-enough that future rules may want it, but no
+/// external caller today.
 #[must_use]
-pub fn enclosing_class(node: Node<'_>) -> Option<Node<'_>> {
+pub(crate) fn enclosing_class(node: Node<'_>) -> Option<Node<'_>> {
     let mut ancestor = node.parent();
     while let Some(parent) = ancestor {
         if parent.kind() == "class_definition" {
@@ -525,8 +533,11 @@ pub fn enclosing_class(node: Node<'_>) -> Option<Node<'_>> {
 /// Matches exactly the three-segment chain `pytest.mark.skip` or
 /// `pytest.mark.xfail`. `@pytest.mark.skipif`, bare `@skip`,
 /// `@unittest.skip`, etc. all return `false`.
+///
+/// `pub(crate)` — internal helper for
+/// [`decorated_definition_has_skip_or_xfail`].
 #[must_use]
-pub fn is_skip_or_xfail_decorator(decorator: Node<'_>, source: &str) -> bool {
+pub(crate) fn is_skip_or_xfail_decorator(decorator: Node<'_>, source: &str) -> bool {
     let segments = decorator_chain_segments(decorator, source);
     segments.len() == 3
         && segments[0] == "pytest"
