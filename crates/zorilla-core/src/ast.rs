@@ -295,14 +295,39 @@ fn classify_assert_hit<'tree>(
             }
         }
         "call" => {
-            let helpers = helpers?;
             let name = call_final_name(node, source)?;
-            helpers.contains(name).then_some(AssertHit::HelperCall(node))
+            is_assertion_helper_name(name, helpers).then_some(AssertHit::HelperCall(node))
         }
         "with_statement" => with_statement_is_raises_or_warns(node, source)
             .then_some(AssertHit::RaisesContext(node)),
         _ => None,
     }
+}
+
+/// Does `name` look like an assertion-helper identifier?
+///
+/// Two complementary checks:
+///
+/// 1. **Exact match** against the caller-supplied `helpers` set. This is
+///    how the built-in case-sensitive unittest helpers (`assertEqual`,
+///    `assertTrue`, …) and any user-extended names are recognized.
+/// 2. **Snake-case prefix** — names starting with `assert_` or
+///    `_assert_` (the latter covering private helpers like
+///    `_assert_invariant`). This branch is universal Python testing
+///    convention (`assert_called_with`, `assert_css_class_present`, …).
+///
+/// Both branches are gated on `helpers.is_some()`. Callers that pass
+/// `None` (e.g. ZR004's bare-assert counter) get a hard `false`: they
+/// only care about `assert_statement` nodes, not helper calls, and must
+/// remain unaffected by helper-name heuristics.
+fn is_assertion_helper_name(
+    name: &str,
+    helpers: Option<&std::collections::HashSet<String>>,
+) -> bool {
+    let Some(helpers) = helpers else {
+        return false;
+    };
+    helpers.contains(name) || name.starts_with("assert_") || name.starts_with("_assert_")
 }
 
 /// The final identifier of a `call` node's `function` expression.
@@ -489,6 +514,36 @@ def test_outer():
             },
         );
         assert!(visited_root, "the start node is always visited");
+    }
+
+    #[test]
+    fn is_assertion_helper_name_accepts_underscore_prefix() {
+        use std::collections::HashSet;
+
+        let helpers: HashSet<String> = std::iter::once("assertEqual".to_string()).collect();
+
+        // Exact match against the configured set still works.
+        assert!(is_assertion_helper_name("assertEqual", Some(&helpers)));
+
+        // Snake-case prefix `assert_…` is accepted when helpers are
+        // active — this is the new behaviour.
+        assert!(is_assertion_helper_name("assert_css_class_present", Some(&helpers)));
+
+        // Private-helper prefix `_assert_…` is also accepted.
+        assert!(is_assertion_helper_name("_assert_invariant", Some(&helpers)));
+
+        // A bare `assertion` (no underscore) must NOT match — the prefix
+        // check requires the underscore so we don't catch unrelated
+        // identifiers like `assertion`, `assertively`, etc.
+        assert!(!is_assertion_helper_name("assertion", Some(&helpers)));
+
+        // The prefix branch is gated on `helpers.is_some()`. With
+        // `None`, only the (absent) exact-match branch would fire — so
+        // an `assert_*` name must NOT match. This preserves ZR004's
+        // bare-assert counter semantics.
+        assert!(!is_assertion_helper_name("assert_css_class_present", None));
+        assert!(!is_assertion_helper_name("_assert_invariant", None));
+        assert!(!is_assertion_helper_name("assertEqual", None));
     }
 
     #[test]

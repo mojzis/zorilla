@@ -246,6 +246,49 @@ def test_ok():
     }
 
     #[test]
+    fn does_not_fire_on_assert_helper_with_underscore_prefix() {
+        // Python projects routinely delegate complex setup-and-check
+        // logic to helpers named `assert_<thing>` (e.g.
+        // `assert_css_class_present`). The test calls such a helper —
+        // ZR003 must recognise the snake-case prefix as an assertion
+        // and stay silent.
+        let src = "\
+def test_uses_assert_helper():
+    assert_css_class_present(html, \"foo\")
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_private_underscore_assert_helper() {
+        // Same convention as `assert_…`, but the helper is module-
+        // private (`_assert_invariant`). The leading underscore is
+        // common for internal helpers; both shapes must be accepted.
+        let src = "\
+def test_uses_private_assert_helper():
+    _assert_invariant(state)
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn still_fires_on_call_named_assertion_without_underscore() {
+        // Regression guard against being too lax: `assertion(x)` shares
+        // a prefix with `assert_*` but lacks the trailing underscore.
+        // It must NOT count as an assertion helper — otherwise we'd
+        // start matching arbitrary identifiers like `assertively()`
+        // and turn ZR003 into a no-op for anything starting with
+        // `assert`.
+        let src = "\
+def test_calls_assertion():
+    assertion(x)
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].code, "ZR003");
+    }
+
+    #[test]
     fn extra_helpers_suppress_finding() {
         // With `expect` registered as an extra helper, the test looks
         // asserting and should not fire.
