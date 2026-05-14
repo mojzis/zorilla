@@ -73,7 +73,11 @@ impl ChangedLines {
                 continue;
             }
             let (path, ranges) = parse_line(trimmed, line_no)?;
-            let entry = raw.entry(path).or_insert(Some(Vec::new()));
+            // Normalize on insertion so manifest entries with `./` prefix
+            // hash to the same key as bare-relative entries. `keeps()`
+            // normalizes the query side too — both sides must agree or
+            // the lookup misses and the file looks untracked.
+            let entry = raw.entry(normalize_path(&path)).or_insert(Some(Vec::new()));
             match (entry, ranges) {
                 // Whole-file already wins; subsequent ranges are absorbed.
                 (None, _) => {}
@@ -130,8 +134,10 @@ impl ChangedLines {
     /// `tests/foo.py`.
     #[must_use]
     pub fn keeps(&self, file: &Path, line: usize) -> bool {
+        // Both insertion and lookup go through `normalize_path`, so a
+        // single keyed lookup is enough — no fallback needed.
         let normalized = normalize_path(file);
-        let entry = self.files.get(&normalized).or_else(|| self.files.get(file));
+        let entry = self.files.get(&normalized);
         match entry {
             None | Some(None) => true,
             Some(Some(rs)) => {
@@ -423,9 +429,16 @@ mod tests {
     #[test]
     fn keeps_normalizes_dot_slash_in_manifest() {
         // The reverse direction: manifest entry has `./` prefix while
-        // finding's path is bare. Should still match.
+        // finding's path is bare. Should still match — AND the entry's
+        // range filter must actually apply. Without the negative
+        // out-of-range assertion this test passes spuriously: if the
+        // `./` key fails to hash-match, the file looks untracked and
+        // every line is kept, including line 99. The positive assertion
+        // alone can't distinguish "normalized correctly" from "missed
+        // the entry entirely".
         let cl = parse("./tests/test_a.py:1-3\n").unwrap();
         assert!(cl.keeps(Path::new("tests/test_a.py"), 2));
+        assert!(!cl.keeps(Path::new("tests/test_a.py"), 99));
     }
 
     #[test]
