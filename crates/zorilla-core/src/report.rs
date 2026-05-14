@@ -597,7 +597,10 @@ tests/test_b.py:3:1: ZR001 conditional-test-logic: test function has conditional
         let rules = parsed["runs"][0]["tool"]["driver"]["rules"].as_array().unwrap();
         let codes: Vec<&str> =
             rules.iter().map(|r| r["id"].as_str().expect("id is string")).collect();
-        assert_eq!(codes, vec!["ZR001", "ZR002", "ZR003", "ZR004", "ZR005", "ZR006", "ZR007"]);
+        assert_eq!(
+            codes,
+            vec!["ZR001", "ZR002", "ZR003", "ZR004", "ZR005", "ZR006", "ZR007", "ZR008"]
+        );
         // Every descriptor must carry a non-empty short + full
         // description; otherwise SARIF viewers fall back to the bare id,
         // defeating the point of populating the catalogue.

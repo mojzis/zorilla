@@ -201,10 +201,10 @@ fn check_format_sarif_emits_sarif_document() {
 }
 
 #[test]
-fn list_rules_lists_all_seven_rules() {
+fn list_rules_lists_all_registered_rules() {
     let assert = Command::cargo_bin("zorilla").unwrap().arg("list-rules").assert().success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    for code in ["ZR001", "ZR002", "ZR003", "ZR004", "ZR005", "ZR006", "ZR007"] {
+    for code in ["ZR001", "ZR002", "ZR003", "ZR004", "ZR005", "ZR006", "ZR007", "ZR008"] {
         assert!(stdout.contains(code), "missing {code} in list-rules output:\n{stdout}");
     }
     for name in [
@@ -215,6 +215,7 @@ fn list_rules_lists_all_seven_rules() {
         "mystery-guest",
         "patch-stack",
         "empty-test",
+        "context-patch-stack",
     ] {
         assert!(stdout.contains(name), "missing {name} in list-rules output:\n{stdout}");
     }
@@ -543,7 +544,7 @@ fn stats_format_json_produces_parseable_output_with_required_keys() {
     // Breakdown must be an object; engine ran at least once, so at
     // minimum the registered rule codes should be present as keys.
     let breakdown = parsed["breakdown"].as_object().expect("breakdown is an object");
-    for code in ["ZR001", "ZR002", "ZR003", "ZR004", "ZR005", "ZR006", "ZR007"] {
+    for code in ["ZR001", "ZR002", "ZR003", "ZR004", "ZR005", "ZR006", "ZR007", "ZR008"] {
         assert!(breakdown.contains_key(code), "missing {code} in breakdown:\n{stdout}");
     }
 }

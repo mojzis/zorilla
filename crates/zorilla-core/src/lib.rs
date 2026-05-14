@@ -186,6 +186,7 @@ mod tests {
         assert_eq!(rule_name_for("ZR005"), "mystery-guest");
         assert_eq!(rule_name_for("ZR006"), "patch-stack");
         assert_eq!(rule_name_for("ZR007"), "empty-test");
+        assert_eq!(rule_name_for("ZR008"), "context-patch-stack");
         assert_eq!(rule_name_for("ZRwhatever"), "unknown");
     }
 

@@ -13,7 +13,8 @@
 //!
 //! Rule-specific config shapes defined so far: [`Zr003Config`] (assertion
 //! helpers), [`Zr004Config`] (`max_asserts`), [`Zr005Config`]
-//! (`allowed_prefixes`), and [`Zr006Config`] (`max_patches`). Future
+//! (`allowed_prefixes`), [`Zr006Config`] (`max_patches`), and
+//! [`Zr008Config`] (`max_patches` for context-manager patches). Future
 //! phases add more.
 
 use std::collections::HashSet;
@@ -33,6 +34,9 @@ pub const DEFAULT_ZR004_MAX_ASSERTS: usize = 4;
 
 /// Default `ZR006.max_patches` — anything strictly greater fires the rule.
 pub const DEFAULT_ZR006_MAX_PATCHES: usize = 3;
+
+/// Default `ZR008.max_patches` — anything strictly greater fires the rule.
+pub const DEFAULT_ZR008_MAX_PATCHES: usize = 3;
 
 /// Built-in assertion-helper names for ZR003.
 ///
@@ -116,6 +120,8 @@ pub struct RuleConfig {
     pub zr005: Zr005Config,
     /// Knobs for ZR006.
     pub zr006: Zr006Config,
+    /// Knobs for ZR008.
+    pub zr008: Zr008Config,
 }
 
 /// Typed knobs for `ZR003 no-assertion`.
@@ -175,6 +181,20 @@ impl Default for Zr006Config {
     }
 }
 
+/// Typed knobs for `ZR008 context-patch-stack`.
+#[derive(Debug, Clone)]
+pub struct Zr008Config {
+    /// Maximum number of `patch(...)` context-manager items allowed per
+    /// test. The rule fires when `patch_count > max_patches`.
+    pub max_patches: usize,
+}
+
+impl Default for Zr008Config {
+    fn default() -> Self {
+        Self { max_patches: DEFAULT_ZR008_MAX_PATCHES }
+    }
+}
+
 /// Raw `[tool.zorilla]` section as it appears in TOML.
 #[derive(Debug, Default, Deserialize, Clone)]
 struct RawConfig {
@@ -203,6 +223,8 @@ struct RawRules {
     zr006: RawZr006,
     #[serde(default, rename = "ZR007")]
     zr007: RawRuleCommon,
+    #[serde(default, rename = "ZR008")]
+    zr008: RawZr008,
 }
 
 #[derive(Debug, Default, Deserialize, Clone)]
@@ -237,6 +259,14 @@ struct RawZr005 {
 
 #[derive(Debug, Default, Deserialize, Clone)]
 struct RawZr006 {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    max_patches: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+struct RawZr008 {
     #[serde(default)]
     enabled: Option<bool>,
     #[serde(default)]
@@ -353,6 +383,9 @@ impl Config {
         if self.rules.zr007.enabled == Some(false) {
             disabled.insert("ZR007");
         }
+        if self.rules.zr008.enabled == Some(false) {
+            disabled.insert("ZR008");
+        }
 
         let mut helpers = Zr003Config::default().helpers;
         if let Some(extra) = &self.rules.zr003.extra_helpers {
@@ -377,12 +410,15 @@ impl Config {
 
         let max_patches = self.rules.zr006.max_patches.unwrap_or(DEFAULT_ZR006_MAX_PATCHES);
 
+        let zr008_max_patches = self.rules.zr008.max_patches.unwrap_or(DEFAULT_ZR008_MAX_PATCHES);
+
         RuleConfig {
             disabled,
             zr003: Zr003Config { helpers },
             zr004: Zr004Config { max_asserts },
             zr005: Zr005Config { allowed_prefixes },
             zr006: Zr006Config { max_patches },
+            zr008: Zr008Config { max_patches: zr008_max_patches },
         }
     }
 }
@@ -457,13 +493,16 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(
             tmp.path().join("zorilla.toml"),
-            "[rules.ZR003]\nenabled = false\n[rules.ZR001]\nenabled = false\n",
+            "[rules.ZR003]\nenabled = false\n\
+             [rules.ZR001]\nenabled = false\n\
+             [rules.ZR008]\nenabled = false\n",
         )
         .unwrap();
         let cfg = Config::discover(tmp.path()).unwrap();
         let rc = cfg.rule_config();
         assert!(rc.disabled.contains("ZR001"));
         assert!(rc.disabled.contains("ZR003"));
+        assert!(rc.disabled.contains("ZR008"));
         assert!(!rc.disabled.contains("ZR002"));
     }
 
@@ -565,6 +604,29 @@ mod tests {
     fn rule_config_defaults_zr006_max_patches() {
         let rc = Config::default().rule_config();
         assert_eq!(rc.zr006.max_patches, DEFAULT_ZR006_MAX_PATCHES);
+    }
+
+    #[test]
+    fn rule_config_reads_zr008_max_patches() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("zorilla.toml"), "[rules.ZR008]\nmax_patches = 5\n")
+            .unwrap();
+        let cfg = Config::discover(tmp.path()).unwrap();
+        assert_eq!(cfg.rule_config().zr008.max_patches, 5);
+    }
+
+    #[test]
+    fn rule_config_defaults_zr008_max_patches() {
+        let rc = Config::default().rule_config();
+        assert_eq!(rc.zr008.max_patches, DEFAULT_ZR008_MAX_PATCHES);
+    }
+
+    #[test]
+    fn rule_config_zr008_is_enabled_by_default() {
+        // No config file => no `enabled = false` for ZR008 => not in
+        // `disabled`. Mirrors how the engine treats every default-on rule.
+        let rc = Config::default().rule_config();
+        assert!(!rc.disabled.contains("ZR008"));
     }
 
     #[test]

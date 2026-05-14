@@ -50,6 +50,12 @@
               "name": "empty-test",
               "shortDescription": { "text": "empty-test" },
               "fullDescription": { "text": "<normalised>" }
+            },
+            {
+              "id": "ZR008",
+              "name": "context-patch-stack",
+              "shortDescription": { "text": "context-patch-stack" },
+              "fullDescription": { "text": "<normalised>" }
             }
           ]
         }

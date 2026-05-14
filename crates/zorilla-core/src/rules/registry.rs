@@ -11,6 +11,7 @@ use super::zr004_assertion_roulette::ZR004_ASSERTION_ROULETTE;
 use super::zr005_mystery_guest::ZR005_MYSTERY_GUEST;
 use super::zr006_patch_stack::ZR006_PATCH_STACK;
 use super::zr007_empty_test::ZR007_EMPTY_TEST;
+use super::zr008_context_patch_stack::ZR008_CONTEXT_PATCH_STACK;
 use super::Rule;
 
 static ALL_RULES: &[&dyn Rule] = &[
@@ -21,6 +22,7 @@ static ALL_RULES: &[&dyn Rule] = &[
     &ZR005_MYSTERY_GUEST,
     &ZR006_PATCH_STACK,
     &ZR007_EMPTY_TEST,
+    &ZR008_CONTEXT_PATCH_STACK,
 ];
 
 /// Return every rule known to the engine, in ZR-code order.
@@ -48,7 +50,10 @@ mod tests {
     #[test]
     fn registry_contains_all_rules_in_code_order() {
         let codes: Vec<_> = all().iter().map(|r| r.code()).collect();
-        assert_eq!(codes, vec!["ZR001", "ZR002", "ZR003", "ZR004", "ZR005", "ZR006", "ZR007"]);
+        assert_eq!(
+            codes,
+            vec!["ZR001", "ZR002", "ZR003", "ZR004", "ZR005", "ZR006", "ZR007", "ZR008"]
+        );
     }
 
     #[test]

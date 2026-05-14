@@ -18,6 +18,7 @@ pub mod zr004_assertion_roulette;
 pub mod zr005_mystery_guest;
 pub mod zr006_patch_stack;
 pub mod zr007_empty_test;
+pub mod zr008_context_patch_stack;
 
 pub use crate::config::RuleConfig;
 pub use crate::report::Severity;
