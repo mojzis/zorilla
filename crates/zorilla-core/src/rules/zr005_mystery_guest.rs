@@ -669,24 +669,33 @@ class TestUsers:
     }
 
     #[test]
-    fn does_not_fire_on_app_request() {
-        // Design decision: the TestClient heuristic skips only the FIRST
-        // positional string argument. `.request(...)` is unusual in that
-        // its URL is the SECOND positional (the first being the HTTP
-        // method name like `"GET"`). Rather than special-case `.request`
-        // we keep the predicate uniform — first-positional only — and
-        // accept that `app.request("GET", "/x")` will still flag `/x`.
-        //
-        // The mirror "no-fire" assertion this test name implies still
-        // holds for the canonical receiver shape: `app.get("/x")` (URL
-        // at position 0) is skipped. Exercise that here so the
-        // heuristic's *receiver* coverage (`app`) is locked in.
+    fn does_not_fire_on_app_get_path() {
+        // Lock in the `app` receiver: `app.get("/x")` is recognised as a
+        // TestClient call and the route literal is skipped.
         let src = "\
 def test_requests():
     resp = app.get(\"/x\")
     assert resp.ok
 ";
         assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_app_request_second_positional() {
+        // Design decision: the TestClient heuristic skips only the FIRST
+        // positional string argument. `.request(...)` is unusual in that
+        // its URL is the SECOND positional (the first being the HTTP
+        // method name like `"GET"`). Rather than special-case `.request`
+        // we keep the predicate uniform — first-positional only — and
+        // accept that `app.request("GET", "/x")` will still flag `/x`.
+        let src = "\
+def test_requests():
+    resp = app.request(\"GET\", \"/x\")
+    assert resp.ok
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].message.contains("/x"));
     }
 
     #[test]

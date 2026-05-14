@@ -1,11 +1,12 @@
 //! Suppression annotation parsing.
 //!
-//! Recognises three forms of inline directive (matching the biston dialect
+//! Recognises four forms of inline directive (matching the biston dialect
 //! described in `PLAN.md`):
 //!
 //! | Comment                              | Effect                                                |
 //! | ------------------------------------ | ----------------------------------------------------- |
 //! | `# zorilla: ignore-file`             | every finding in the file is suppressed               |
+//! | `# zorilla: ignore-file[ZR005,ZR007]`| listed codes (case-insensitive) suppressed file-wide  |
 //! | `# zorilla: ignore`                  | every finding **on the same line** is suppressed      |
 //! | `# zorilla: ignore[ZR001,ZR003]`     | listed codes (case-insensitive) on the same line only |
 //!
@@ -186,11 +187,20 @@ enum ParsedDirective {
 /// Decode the text **after** the `zorilla:` token. Returns a
 /// [`ParsedDirective`] when we recognise the form; returns `None` for
 /// anything we don't (including bare `ignore-file[]` which is a noop).
+///
+/// Whitespace between the keyword and a bracket list is tolerated:
+/// `ignore-file [ZR005]` and `ignore [ZR001]` are parsed the same way as
+/// the no-space form. Without this allowance the bracketed form would
+/// silently degrade to `All`, widening user-requested suppression scope.
 fn parse_directive(directive: &str) -> Option<ParsedDirective> {
     // `ignore-file` must be checked before `ignore` because the latter is
     // a prefix of the former.
     if let Some(tail) = directive.strip_prefix("ignore-file") {
-        if let Some(after_bracket) = tail.strip_prefix('[') {
+        // Allow optional whitespace between the keyword and a bracket
+        // list — `ignore-file [ZR005]` honours the brackets instead of
+        // falling through to the bare-keyword (`All`) branch.
+        let after_keyword = tail.trim_start();
+        if let Some(after_bracket) = after_keyword.strip_prefix('[') {
             let close = after_bracket.find(']')?;
             let inside = &after_bracket[..close];
             let codes = parse_code_list(inside);
@@ -209,7 +219,10 @@ fn parse_directive(directive: &str) -> Option<ParsedDirective> {
     }
 
     let tail = directive.strip_prefix("ignore")?;
-    if let Some(after_bracket) = tail.strip_prefix('[') {
+    // Same whitespace allowance for line scope: `ignore [ZR001]` parses
+    // as a bracketed directive, not bare-`ignore`-then-extra-text.
+    let after_keyword = tail.trim_start();
+    if let Some(after_bracket) = after_keyword.strip_prefix('[') {
         let close = after_bracket.find(']')?;
         let inside = &after_bracket[..close];
         let codes = parse_code_list(inside);
@@ -480,5 +493,26 @@ mod tests {
         assert!(!s.suppresses_code("ZR001"));
         assert!(!s.suppresses_code("ZR005"));
         assert!(!s.is_suppressed(1, "ZR005"));
+    }
+
+    #[test]
+    fn ignore_file_with_space_before_brackets_does_not_widen_to_all() {
+        // Regression guard: a user typing `# zorilla: ignore-file [ZR005]`
+        // (with a space between the keyword and the bracket) was previously
+        // misparsed as bare `ignore-file` — i.e. dropping every code rather
+        // than only ZR005. Tolerate the whitespace and honour the brackets.
+        let s = Suppressions::from_source("# zorilla: ignore-file [ZR005]\n");
+        assert!(s.suppresses_code("ZR005"));
+        assert!(!s.suppresses_code("ZR001"));
+    }
+
+    #[test]
+    fn ignore_with_space_before_brackets_does_not_widen_to_all() {
+        // Same hazard at line scope: `# zorilla: ignore [ZR001]` was
+        // previously misparsed as bare `ignore`, dropping every code on the
+        // line rather than only ZR001.
+        let s = Suppressions::from_source("x = 1  # zorilla: ignore [ZR001]\n");
+        assert!(s.is_suppressed(1, "ZR001"));
+        assert!(!s.is_suppressed(1, "ZR002"));
     }
 }
