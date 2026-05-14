@@ -29,6 +29,10 @@ use tree_sitter::{Node, Tree, TreeCursor};
 /// replaces hand-written cursor loops inside every rule: "find the first
 /// X" becomes `Break(node)`, "collect all X" stays `Continue(())` and
 /// mutates a captured `Vec`.
+///
+/// Always descends into every child. When a rule wants to skip certain
+/// subtrees (e.g. "the outer test body's control flow only — ignore
+/// nested function definitions"), use [`walk_descendants_pruned`].
 pub fn walk_descendants<'tree, B>(
     root: Node<'tree>,
     mut visit: impl FnMut(Node<'tree>) -> ControlFlow<B>,
@@ -48,6 +52,52 @@ fn recurse<'tree, B>(
             loop {
                 let child = cursor.node();
                 recurse(cursor, child, visit)?;
+                if !cursor.goto_next_sibling() {
+                    return ControlFlow::Continue(());
+                }
+            }
+        })();
+        cursor.goto_parent();
+        result?;
+    }
+    ControlFlow::Continue(())
+}
+
+/// Like [`walk_descendants`] but consults `should_descend(child)` before
+/// recursing into each child. The visitor still runs on the start node
+/// and on every node that survives the descent filter.
+///
+/// Use this when a rule wants to prune whole subtrees during a walk —
+/// e.g. ZR001 skipping `function_definition` / `lambda` children so the
+/// outer test's control flow is the only concern. Pruned nodes are
+/// never passed to `visit` and their children are never visited either.
+///
+/// Contrast with [`walk_descendants`]: that helper always descends; its
+/// visitor closure cannot prevent descent without short-circuiting the
+/// entire walk via `ControlFlow::Break`.
+pub fn walk_descendants_pruned<'tree, B>(
+    root: Node<'tree>,
+    mut should_descend: impl FnMut(Node<'tree>) -> bool,
+    mut visit: impl FnMut(Node<'tree>) -> ControlFlow<B>,
+) -> ControlFlow<B> {
+    let mut cursor = root.walk();
+    recurse_pruned(&mut cursor, root, &mut should_descend, &mut visit)
+}
+
+fn recurse_pruned<'tree, B>(
+    cursor: &mut TreeCursor<'tree>,
+    node: Node<'tree>,
+    should_descend: &mut dyn FnMut(Node<'tree>) -> bool,
+    visit: &mut dyn FnMut(Node<'tree>) -> ControlFlow<B>,
+) -> ControlFlow<B> {
+    visit(node)?;
+    if cursor.goto_first_child() {
+        let result = (|| -> ControlFlow<B> {
+            loop {
+                let child = cursor.node();
+                if should_descend(child) {
+                    recurse_pruned(cursor, child, should_descend, visit)?;
+                }
                 if !cursor.goto_next_sibling() {
                     return ControlFlow::Continue(());
                 }
@@ -368,6 +418,77 @@ mod tests {
         let src = "class OtherThing:\n    def test_foo(self):\n        pass\n";
         let tree = parse(src).unwrap();
         assert!(!is_test_function(find_fn(&tree, src, "test_foo"), src));
+    }
+
+    #[test]
+    fn walk_descendants_pruned_skips_nested_function_definition_subtrees() {
+        // The outer body contains a top-level `if_statement`, plus a
+        // nested `def helper()` whose own body contains another
+        // `if_statement`. Pruning on `function_definition` must visit
+        // the outer `if` but not the inner one — confirming that the
+        // subtree under the pruned node never reaches the visitor.
+        let src = "\
+def test_outer():
+    if True:
+        pass
+    def helper():
+        if False:
+            pass
+    helper()
+";
+        let tree = parse(src).unwrap();
+        let test_fn = find_fn(&tree, src, "test_outer");
+        let body = test_fn.child_by_field_name("body").unwrap();
+
+        // Baseline: the unpruned walk sees both `if_statement`s.
+        let mut unpruned = Vec::new();
+        let _ = walk_descendants::<()>(body, |n| {
+            if n.kind() == "if_statement" {
+                unpruned.push(n.start_position().row);
+            }
+            ControlFlow::Continue(())
+        });
+        assert_eq!(unpruned.len(), 2, "sanity: source has two if_statements");
+
+        // Pruning on `function_definition` keeps only the outer one.
+        let mut pruned = Vec::new();
+        let _ = walk_descendants_pruned::<()>(
+            body,
+            |n| !matches!(n.kind(), "function_definition" | "lambda"),
+            |n| {
+                if n.kind() == "if_statement" {
+                    pruned.push(n.start_position().row);
+                }
+                ControlFlow::Continue(())
+            },
+        );
+        assert_eq!(pruned.len(), 1);
+        // The outer `if True:` is on the second line of the source
+        // (0-indexed row 1).
+        assert_eq!(pruned[0], 1);
+    }
+
+    #[test]
+    fn walk_descendants_pruned_visits_root_even_if_should_descend_rejects_root_kind() {
+        // The closure is only consulted for *children* — the root node
+        // is always visited. This makes "skip nested defs while
+        // walking a body" work even when the body itself happens to be
+        // (or contain) a function_definition shape.
+        let src = "def f():\n    pass\n";
+        let tree = parse(src).unwrap();
+        let root = tree.root_node();
+        let mut visited_root = false;
+        let _ = walk_descendants_pruned::<()>(
+            root,
+            |_| false,
+            |n| {
+                if n == root {
+                    visited_root = true;
+                }
+                ControlFlow::Continue(())
+            },
+        );
+        assert!(visited_root, "the start node is always visited");
     }
 
     #[test]
