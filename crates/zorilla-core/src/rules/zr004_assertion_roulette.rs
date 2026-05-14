@@ -49,7 +49,7 @@
 //!     assert a.v == 5, "v"
 //! ```
 
-use crate::ast::{count_bare_asserts_with_first, iter_test_functions};
+use crate::ast::{self, count_bare_asserts_with_first, iter_test_functions};
 use crate::report::{Finding, Severity};
 use crate::rules::{Context, Rule};
 
@@ -78,6 +78,13 @@ impl Rule for AssertionRouletteRule {
             let Some(body) = test_fn.child_by_field_name("body") else {
                 continue;
             };
+            // Skip tests marked `@pytest.mark.skip` / `@pytest.mark.xfail`
+            // (function-level or class-level). The body isn't executed,
+            // so its assert count is academic — mirrors ZR007's gate.
+            // `skipif` is conditional and intentionally not matched.
+            if ast::test_has_skip_or_xfail_decorator(test_fn, ctx.source) {
+                continue;
+            }
             let (count, first) = count_bare_asserts_with_first(body, ctx.source);
             if count > max_asserts {
                 // `count > max_asserts` with `max_asserts: usize` implies
@@ -230,6 +237,83 @@ class TestThing:
         let out = run(src);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].line, 3);
+    }
+
+    #[test]
+    fn does_not_fire_on_pytest_mark_skip() {
+        // Skipped tests don't execute — their bare-assert count is
+        // academic. Mirrors ZR007's gate.
+        let src = "\
+@pytest.mark.skip
+def test_x():
+    assert 1 == 1
+    assert 2 == 2
+    assert 3 == 3
+    assert 4 == 4
+    assert 5 == 5
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_pytest_mark_skip_with_reason() {
+        let src = "\
+@pytest.mark.skip(reason=\"todo\")
+def test_x():
+    assert 1 == 1
+    assert 2 == 2
+    assert 3 == 3
+    assert 4 == 4
+    assert 5 == 5
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_pytest_mark_xfail() {
+        let src = "\
+@pytest.mark.xfail
+def test_x():
+    assert 1 == 1
+    assert 2 == 2
+    assert 3 == 3
+    assert 4 == 4
+    assert 5 == 5
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_method_of_class_decorated_with_pytest_mark_skip() {
+        let src = "\
+@pytest.mark.skip
+class TestX:
+    def test_y(self):
+        assert 1 == 1
+        assert 2 == 2
+        assert 3 == 3
+        assert 4 == 4
+        assert 5 == 5
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_pytest_mark_skipif() {
+        // `skipif` is conditional — body runs on the non-skipped path,
+        // so the bare-assert count still counts. Matches ZR007.
+        let src = "\
+@pytest.mark.skipif(True, reason=\"x\")
+def test_x():
+    assert 1 == 1
+    assert 2 == 2
+    assert 3 == 3
+    assert 4 == 4
+    assert 5 == 5
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].code, "ZR004");
     }
 
     #[test]

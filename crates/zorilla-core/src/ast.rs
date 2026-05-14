@@ -447,6 +447,93 @@ fn collect_chain_into<'a>(node: Node<'_>, source: &'a str, out: &mut Vec<&'a str
     }
 }
 
+/// Does the test function carry a `@pytest.mark.skip` or
+/// `@pytest.mark.xfail` decorator (call form with kwargs accepted)?
+///
+/// When the test function is decorated, tree-sitter parses the construct
+/// as `decorated_definition` whose children are one or more `decorator`
+/// nodes followed by the `function_definition`. Walk each decorator and
+/// check via [`is_skip_or_xfail_decorator`].
+///
+/// Method-on-class case: pytest treats a class-level `@pytest.mark.skip`
+/// as suppressing every method inside the class. ~/git/esl's 50
+/// placeholder stubs all use this pattern. So when the test function is
+/// a method on a `class Test*`, also check the enclosing class's
+/// decorators.
+///
+/// `@pytest.mark.skipif(...)` is **not** matched here — `skipif` is
+/// conditional, so the body is expected to do real work on the
+/// non-skipped path. The check is exact: segments must be exactly
+/// `["pytest", "mark", "skip"]` or `["pytest", "mark", "xfail"]`.
+#[must_use]
+pub fn test_has_skip_or_xfail_decorator(test_fn: Node<'_>, source: &str) -> bool {
+    if decorated_definition_has_skip_or_xfail(test_fn.parent(), source) {
+        return true;
+    }
+    if let Some(class) = enclosing_class(test_fn) {
+        if decorated_definition_has_skip_or_xfail(class.parent(), source) {
+            return true;
+        }
+    }
+    false
+}
+
+/// If `maybe_decorated` is a `decorated_definition`, scan its decorators
+/// for any `@pytest.mark.skip` or `@pytest.mark.xfail`.
+#[must_use]
+pub fn decorated_definition_has_skip_or_xfail(
+    maybe_decorated: Option<Node<'_>>,
+    source: &str,
+) -> bool {
+    let Some(parent) = maybe_decorated else {
+        return false;
+    };
+    if parent.kind() != "decorated_definition" {
+        return false;
+    }
+    let mut cursor = parent.walk();
+    for child in parent.named_children(&mut cursor) {
+        if child.kind() == "decorator" && is_skip_or_xfail_decorator(child, source) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Walk ancestors of a (test) function and return the nearest enclosing
+/// `class_definition`, if any.
+///
+/// The method-level decorator gate uses the function's immediate parent,
+/// but a class-level decorator sits on the `class_definition`'s parent
+/// (`decorated_definition`), so we need a handle on the class node
+/// itself.
+#[must_use]
+pub fn enclosing_class(node: Node<'_>) -> Option<Node<'_>> {
+    let mut ancestor = node.parent();
+    while let Some(parent) = ancestor {
+        if parent.kind() == "class_definition" {
+            return Some(parent);
+        }
+        ancestor = parent.parent();
+    }
+    None
+}
+
+/// Is `decorator` a `@pytest.mark.skip` / `@pytest.mark.xfail` decorator
+/// (bare or call form)?
+///
+/// Matches exactly the three-segment chain `pytest.mark.skip` or
+/// `pytest.mark.xfail`. `@pytest.mark.skipif`, bare `@skip`,
+/// `@unittest.skip`, etc. all return `false`.
+#[must_use]
+pub fn is_skip_or_xfail_decorator(decorator: Node<'_>, source: &str) -> bool {
+    let segments = decorator_chain_segments(decorator, source);
+    segments.len() == 3
+        && segments[0] == "pytest"
+        && segments[1] == "mark"
+        && (segments[2] == "skip" || segments[2] == "xfail")
+}
+
 /// Climb past any `parenthesized_expression` wrappers around `node`,
 /// returning the outermost equivalent expression.
 ///

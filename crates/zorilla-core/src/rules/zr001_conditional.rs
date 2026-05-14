@@ -68,7 +68,7 @@ use std::ops::ControlFlow;
 
 use tree_sitter::Node;
 
-use crate::ast::{call_final_name, iter_test_functions, walk_descendants_pruned};
+use crate::ast::{self, call_final_name, iter_test_functions, walk_descendants_pruned};
 use crate::report::{Finding, Severity};
 use crate::rules::{Context, Rule};
 
@@ -100,6 +100,16 @@ impl Rule for ConditionalRule {
             let Some(body) = test_fn.child_by_field_name("body") else {
                 continue;
             };
+            // Skip tests marked `@pytest.mark.skip` / `@pytest.mark.xfail`
+            // (function-level or class-level). The body isn't executed,
+            // so its structural smells are irrelevant — flagging them
+            // produces a noisy false positive across placeholder stubs
+            // (esl's 50 `@pytest.mark.skip` class-decorated methods, etc.).
+            // Mirrors ZR007's skip-decorator gate. `skipif` is conditional
+            // and intentionally not matched.
+            if ast::test_has_skip_or_xfail_decorator(test_fn, ctx.source) {
+                continue;
+            }
             // Pre-compute whether the enclosing test function body contains
             // *any* assert-shaped construct anywhere — but only at the
             // outer test's scope. The cleanup-loop downgrade
@@ -1069,6 +1079,72 @@ class TestSomething:
                     do(case)
 ";
         assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_pytest_mark_skip() {
+        // Skipped tests don't execute — their structural smells are
+        // suppressed. Mirrors ZR007's gate.
+        let src = "\
+@pytest.mark.skip
+def test_x():
+    if True:
+        assert True
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_pytest_mark_skip_with_reason() {
+        let src = "\
+@pytest.mark.skip(reason=\"todo\")
+def test_x():
+    if True:
+        assert True
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_pytest_mark_xfail() {
+        let src = "\
+@pytest.mark.xfail
+def test_x():
+    for case in CASES:
+        if case:
+            assert case
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_method_of_class_decorated_with_pytest_mark_skip() {
+        // Class-level `@pytest.mark.skip` suppresses every method body,
+        // mirroring ZR007. esl's 50 placeholder-stub pattern.
+        let src = "\
+@pytest.mark.skip
+class TestX:
+    def test_y(self):
+        if True:
+            assert True
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_pytest_mark_skipif() {
+        // `skipif` is conditional — body still runs on the non-skipped
+        // path, so structural smells still flag. Matches ZR007's
+        // documented decision.
+        let src = "\
+@pytest.mark.skipif(True, reason=\"x\")
+def test_x():
+    if True:
+        assert True
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].code, "ZR001");
     }
 
     #[test]

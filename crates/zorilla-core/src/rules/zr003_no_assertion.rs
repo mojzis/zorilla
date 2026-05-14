@@ -59,7 +59,7 @@
 //!         boom()
 //! ```
 
-use crate::ast::{has_any_assert, iter_test_functions};
+use crate::ast::{self, has_any_assert, iter_test_functions};
 use crate::report::{Finding, Severity};
 use crate::rules::{Context, Rule};
 
@@ -91,6 +91,15 @@ impl Rule for NoAssertionRule {
             let Some(body) = test_fn.child_by_field_name("body") else {
                 continue;
             };
+            // Skip tests marked `@pytest.mark.skip` / `@pytest.mark.xfail`
+            // (function-level or class-level). Pytest never runs the body,
+            // so it not asserting is by design — esl's 50 `@pytest.mark.skip`
+            // placeholder stubs ZR007 already exempts re-emerge here without
+            // this gate. Mirrors ZR007's pattern; `skipif` is conditional
+            // and intentionally not matched.
+            if ast::test_has_skip_or_xfail_decorator(test_fn, ctx.source) {
+                continue;
+            }
             if !has_any_assert(body, ctx.source, helpers) {
                 let start = test_fn.start_position();
                 out.push(Finding {
@@ -308,6 +317,66 @@ def test_custom():
         let mut cfg = Config::default().rule_config();
         cfg.zr003.helpers.insert("to_be".to_string());
         assert!(run_with(src, &cfg).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_pytest_mark_skip() {
+        // Skipped tests don't execute, so "no assertion" doesn't matter —
+        // esl's 50 `@pytest.mark.skip` placeholder stubs ZR007 already
+        // suppresses re-emerge here without this gate. Mirrors ZR007.
+        let src = "\
+@pytest.mark.skip
+def test_x():
+    pass
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_pytest_mark_skip_with_reason() {
+        let src = "\
+@pytest.mark.skip(reason=\"todo\")
+def test_x():
+    do_something()
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_pytest_mark_xfail() {
+        let src = "\
+@pytest.mark.xfail
+def test_x():
+    do_something()
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_method_of_class_decorated_with_pytest_mark_skip() {
+        // Class-level `@pytest.mark.skip` suppresses every method body
+        // — esl's 50 placeholder-stub pattern. Mirrors ZR007.
+        let src = "\
+@pytest.mark.skip
+class TestX:
+    def test_y(self):
+        do_something()
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_pytest_mark_skipif() {
+        // `skipif` is conditional — the body runs on the non-skipped
+        // path and must still assert. Matches ZR007's decision.
+        let src = "\
+@pytest.mark.skipif(True, reason=\"x\")
+def test_x():
+    do_something()
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].code, "ZR003");
     }
 
     #[test]
