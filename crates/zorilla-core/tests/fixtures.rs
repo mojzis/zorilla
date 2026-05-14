@@ -69,18 +69,15 @@ fn run_single_rule(rule: &dyn Rule, path: &Path) -> Vec<Finding> {
 }
 
 /// Mirror of `zorilla_core::lint_one_file` for fixture-level
-/// integration: parse suppressions, short-circuit on `ignore-file`, run
-/// every registered rule (modulo `RuleConfig.disabled` and
-/// `default_enabled`), then filter by suppressions. Used only by the
-/// `zr_suppress/` fixture dir, where expectations cover findings
-/// produced by *any* rule.
+/// integration: parse suppressions, short-circuit per code via
+/// `suppresses_code`, run every registered rule (modulo
+/// `RuleConfig.disabled` and `default_enabled`), then filter by
+/// suppressions. Used only by the `zr_suppress/` fixture dir, where
+/// expectations cover findings produced by *any* rule.
 fn run_all_rules_with_suppressions(path: &Path) -> Vec<Finding> {
     let source = std::fs::read_to_string(path).expect("fixture read");
     let tree = parse(&source).expect("fixture parse");
     let suppressions = Suppressions::from_source(&source);
-    if suppressions.suppresses_file() {
-        return Vec::new();
-    }
     let config = RuleConfig::default();
     let ctx = Context {
         file: path,
@@ -92,13 +89,15 @@ fn run_all_rules_with_suppressions(path: &Path) -> Vec<Finding> {
     let mut out = Vec::new();
     for rule in registry::all() {
         // Mirror the engine's filters in the same order as
-        // `lint_one_file`: per-rule disable first, then default-enabled.
-        // Both default to allow-all today, but locking parity here keeps
-        // future config knobs from silently diverging from the harness.
+        // `lint_one_file`: per-rule disable first, then default-enabled,
+        // then file-scope `ignore-file[<code>]` short-circuit.
         if config.disabled.contains(rule.code()) {
             continue;
         }
         if !rule.default_enabled() {
+            continue;
+        }
+        if suppressions.suppresses_code(rule.code()) {
             continue;
         }
         rule.check(&ctx, &mut out);

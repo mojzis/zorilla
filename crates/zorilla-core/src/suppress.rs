@@ -34,14 +34,53 @@ use std::collections::{HashMap, HashSet};
 ///
 /// Built once per file by [`Suppressions::from_source`] and threaded into
 /// [`crate::rules::Context`]. The engine consults
-/// [`Self::suppresses_file`] to short-circuit before any rule runs, then
+/// [`Self::suppresses_code`] to short-circuit a rule before it runs, then
 /// filters per-finding via [`Self::is_suppressed`] after rules have
 /// produced their output.
 #[derive(Debug, Default, Clone)]
 pub struct Suppressions {
-    file_level: bool,
+    file_level: FileLevel,
     /// 1-indexed source line → suppression scope on that line.
     per_line: HashMap<usize, LineSuppression>,
+}
+
+/// File-scope suppression — produced by `# zorilla: ignore-file` and
+/// `# zorilla: ignore-file[ZR00X, ...]` directives.
+#[derive(Debug, Clone, Default)]
+enum FileLevel {
+    /// No file-level directive was seen.
+    #[default]
+    None,
+    /// `# zorilla: ignore-file` — drop every code at file scope.
+    All,
+    /// `# zorilla: ignore-file[ZR00X, ...]` — drop only listed codes
+    /// across the whole file. Codes are stored upper-cased so lookup is
+    /// `code.to_ascii_uppercase()`.
+    Codes(HashSet<String>),
+}
+
+impl FileLevel {
+    /// Combine two file-scope directives encountered in the same file.
+    /// `All` dominates; otherwise the code sets union.
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::All, _) | (_, Self::All) => Self::All,
+            (Self::None, x) | (x, Self::None) => x,
+            (Self::Codes(mut a), Self::Codes(b)) => {
+                a.extend(b);
+                Self::Codes(a)
+            }
+        }
+    }
+
+    /// Does this file-scope directive suppress `code`?
+    fn suppresses(&self, code: &str) -> bool {
+        match self {
+            Self::None => false,
+            Self::All => true,
+            Self::Codes(set) => set.contains(&code.to_ascii_uppercase()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -96,18 +135,28 @@ impl Suppressions {
                 continue;
             };
             let directive = rest.trim();
-            if let Some(suppression) = parse_directive(directive, &mut out.file_level) {
-                merge_into(&mut out.per_line, line_no, suppression);
+            match parse_directive(directive) {
+                Some(ParsedDirective::Line(suppression)) => {
+                    merge_into(&mut out.per_line, line_no, suppression);
+                }
+                Some(ParsedDirective::File(file_level)) => {
+                    let existing = std::mem::take(&mut out.file_level);
+                    out.file_level = existing.merge(file_level);
+                }
+                None => {}
             }
         }
         out
     }
 
-    /// `true` iff any `# zorilla: ignore-file` comment was found in the
-    /// parsed source. The engine checks this before running any rule.
+    /// Whether rule `code` is suppressed at file scope — i.e. a
+    /// `# zorilla: ignore-file` (all codes) or
+    /// `# zorilla: ignore-file[<code>, ...]` directive appears in the
+    /// file. The engine checks this before running each rule's `check()`
+    /// so an entirely silenced rule never visits the AST.
     #[must_use]
-    pub fn suppresses_file(&self) -> bool {
-        self.file_level
+    pub fn suppresses_code(&self, code: &str) -> bool {
+        self.file_level.suppresses(code)
     }
 
     /// Whether a finding reported at `line` for rule `code` is silenced
@@ -115,7 +164,7 @@ impl Suppressions {
     /// module-level rustdoc.
     #[must_use]
     pub fn is_suppressed(&self, line: usize, code: &str) -> bool {
-        if self.file_level {
+        if self.file_level.suppresses(code) {
             return true;
         }
         match self.per_line.get(&line) {
@@ -126,16 +175,36 @@ impl Suppressions {
     }
 }
 
-/// Decode the text **after** the `zorilla:` token. Sets `file_level` for
-/// `ignore-file`; returns a [`LineSuppression`] for the line variants;
-/// returns `None` for anything we don't recognise.
-fn parse_directive(directive: &str, file_level: &mut bool) -> Option<LineSuppression> {
+/// Outcome of parsing a single `# zorilla: <directive>` comment.
+enum ParsedDirective {
+    /// A line-scope directive (`ignore` or `ignore[...]`).
+    Line(LineSuppression),
+    /// A file-scope directive (`ignore-file` or `ignore-file[...]`).
+    File(FileLevel),
+}
+
+/// Decode the text **after** the `zorilla:` token. Returns a
+/// [`ParsedDirective`] when we recognise the form; returns `None` for
+/// anything we don't (including bare `ignore-file[]` which is a noop).
+fn parse_directive(directive: &str) -> Option<ParsedDirective> {
     // `ignore-file` must be checked before `ignore` because the latter is
     // a prefix of the former.
     if let Some(tail) = directive.strip_prefix("ignore-file") {
-        if tail.is_empty() || tail.starts_with(char::is_whitespace) {
-            *file_level = true;
+        if let Some(after_bracket) = tail.strip_prefix('[') {
+            let close = after_bracket.find(']')?;
+            let inside = &after_bracket[..close];
+            let codes = parse_code_list(inside);
+            if codes.is_empty() {
+                // `# zorilla: ignore-file[]` — no codes, no effect.
+                // Don't degrade to `All` silently.
+                return None;
+            }
+            return Some(ParsedDirective::File(FileLevel::Codes(codes)));
         }
+        if tail.is_empty() || tail.starts_with(char::is_whitespace) {
+            return Some(ParsedDirective::File(FileLevel::All));
+        }
+        // `ignore-fileXYZ` — not a directive we recognise.
         return None;
     }
 
@@ -143,25 +212,32 @@ fn parse_directive(directive: &str, file_level: &mut bool) -> Option<LineSuppres
     if let Some(after_bracket) = tail.strip_prefix('[') {
         let close = after_bracket.find(']')?;
         let inside = &after_bracket[..close];
-        let mut codes = HashSet::new();
-        for raw in inside.split(',') {
-            let trimmed = raw.trim();
-            if !trimmed.is_empty() {
-                codes.insert(trimmed.to_ascii_uppercase());
-            }
-        }
+        let codes = parse_code_list(inside);
         if codes.is_empty() {
             // `# zorilla: ignore[]` — no codes, no effect. Don't degrade
             // to `All` silently.
             return None;
         }
-        return Some(LineSuppression::Codes(codes));
+        return Some(ParsedDirective::Line(LineSuppression::Codes(codes)));
     }
 
     if tail.is_empty() || tail.starts_with(char::is_whitespace) {
-        return Some(LineSuppression::All);
+        return Some(ParsedDirective::Line(LineSuppression::All));
     }
     None
+}
+
+/// Parse a comma-separated list of rule codes (e.g. `ZR001, zr003`) into
+/// an upper-cased set. Whitespace and empty entries are ignored.
+fn parse_code_list(inside: &str) -> HashSet<String> {
+    let mut codes = HashSet::new();
+    for raw in inside.split(',') {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            codes.insert(trimmed.to_ascii_uppercase());
+        }
+    }
+    codes
 }
 
 /// Insert `incoming` at `line`, merging with any existing entry via
@@ -200,13 +276,13 @@ mod tests {
         let s = Suppressions::empty();
         assert!(!s.is_suppressed(1, "ZR001"));
         assert!(!s.is_suppressed(42, "ZR999"));
-        assert!(!s.suppresses_file());
+        assert!(!s.suppresses_code("ZR001"));
     }
 
     #[test]
     fn from_source_with_no_directives_is_empty() {
         let s = Suppressions::from_source("def test_x():\n    assert True\n# unrelated comment\n");
-        assert!(!s.suppresses_file());
+        assert!(!s.suppresses_code("ZR001"));
         assert!(!s.is_suppressed(1, "ZR001"));
         assert!(!s.is_suppressed(3, "ZR001"));
     }
@@ -216,7 +292,7 @@ mod tests {
         let s = Suppressions::from_source(
             "# zorilla: ignore-file\ndef test_x():\n    if True:\n        assert True\n",
         );
-        assert!(s.suppresses_file());
+        assert!(s.suppresses_code("ZR001"));
         assert!(s.is_suppressed(99, "ZR001"));
         assert!(s.is_suppressed(1, "ZR007"));
     }
@@ -225,13 +301,13 @@ mod tests {
     fn ignore_file_inline_after_code_still_counts() {
         // The directive doesn't have to be the only thing on its line.
         let s = Suppressions::from_source("import os  # zorilla: ignore-file\n");
-        assert!(s.suppresses_file());
+        assert!(s.suppresses_code("ZR001"));
     }
 
     #[test]
     fn ignore_file_with_trailing_text_still_counts() {
         let s = Suppressions::from_source("# zorilla: ignore-file (legacy fixture)\n");
-        assert!(s.suppresses_file());
+        assert!(s.suppresses_code("ZR001"));
     }
 
     #[test]
@@ -339,7 +415,7 @@ mod tests {
     #[test]
     fn unrecognised_directives_are_ignored() {
         let s = Suppressions::from_source("# zorilla: maybe-later\n# something else\n");
-        assert!(!s.suppresses_file());
+        assert!(!s.suppresses_code("ZR001"));
         assert!(!s.is_suppressed(1, "ZR001"));
         assert!(!s.is_suppressed(2, "ZR001"));
     }
@@ -357,5 +433,52 @@ mod tests {
         // `ignorefoo` must not be mistaken for `ignore`.
         let s = Suppressions::from_source("x = 1  # zorilla: ignorefoo\n");
         assert!(!s.is_suppressed(1, "ZR001"));
+    }
+
+    #[test]
+    fn ignore_file_with_brackets_only_suppresses_listed_code() {
+        let s = Suppressions::from_source("# zorilla: ignore-file[ZR005]\n");
+        assert!(s.suppresses_code("ZR005"));
+        assert!(s.is_suppressed(1, "ZR005"));
+        assert!(s.is_suppressed(42, "ZR005"));
+    }
+
+    #[test]
+    fn ignore_file_without_brackets_still_suppresses_all() {
+        // Back-compat: bare `# zorilla: ignore-file` continues to drop
+        // every code in the file.
+        let s = Suppressions::from_source("# zorilla: ignore-file\n");
+        assert!(s.suppresses_code("ZR001"));
+        assert!(s.suppresses_code("ZR005"));
+        assert!(s.suppresses_code("ZR999"));
+    }
+
+    #[test]
+    fn ignore_file_brackets_do_not_suppress_other_codes() {
+        let s = Suppressions::from_source("# zorilla: ignore-file[ZR005]\n");
+        assert!(!s.suppresses_code("ZR001"));
+        assert!(!s.is_suppressed(1, "ZR001"));
+    }
+
+    #[test]
+    fn ignore_file_brackets_codes_are_case_insensitive() {
+        let s = Suppressions::from_source("# zorilla: ignore-file[zr005, Zr007]\n");
+        assert!(s.suppresses_code("ZR005"));
+        assert!(s.suppresses_code("ZR007"));
+        // Lookup is case-insensitive too.
+        assert!(s.suppresses_code("zr005"));
+        assert!(s.is_suppressed(3, "ZR005"));
+        assert!(s.is_suppressed(3, "ZR007"));
+        assert!(!s.is_suppressed(3, "ZR001"));
+    }
+
+    #[test]
+    fn ignore_file_empty_brackets_are_a_noop() {
+        // Better to do nothing than to silently treat `ignore-file[]` as
+        // `ignore-file` and suppress every code.
+        let s = Suppressions::from_source("# zorilla: ignore-file[]\n");
+        assert!(!s.suppresses_code("ZR001"));
+        assert!(!s.suppresses_code("ZR005"));
+        assert!(!s.is_suppressed(1, "ZR005"));
     }
 }

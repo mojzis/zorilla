@@ -88,9 +88,6 @@ fn lint_one_file(
         return Vec::new();
     };
     let suppressions = Suppressions::from_source(&source);
-    if suppressions.suppresses_file() {
-        return Vec::new();
-    }
 
     let ctx = Context {
         file,
@@ -106,6 +103,12 @@ fn lint_one_file(
             continue;
         }
         if !rule.default_enabled() {
+            continue;
+        }
+        // File-scope `# zorilla: ignore-file[CODE]` (and the bare
+        // `ignore-file` shorthand for all codes) short-circuits a rule's
+        // check before any AST traversal.
+        if suppressions.suppresses_code(rule.code()) {
             continue;
         }
         rule.check(&ctx, &mut out);
