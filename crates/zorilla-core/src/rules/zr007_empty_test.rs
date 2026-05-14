@@ -101,12 +101,32 @@ impl Rule for EmptyTestRule {
 /// nodes followed by the `function_definition`. Walk each decorator and
 /// check via [`is_skip_or_xfail_decorator`].
 ///
+/// Method-on-class case: pytest treats a class-level `@pytest.mark.skip`
+/// as suppressing every method inside the class. ~/git/esl's 50
+/// placeholder stubs all use this pattern. So when the test function is
+/// a method on a `class Test*`, also check the enclosing class's
+/// decorators.
+///
 /// `@pytest.mark.skipif(...)` is **not** matched here — `skipif` is
 /// conditional, so the body is expected to do real work on the
 /// non-skipped path. The check is exact: segments must be exactly
 /// `["pytest", "mark", "skip"]` or `["pytest", "mark", "xfail"]`.
 fn test_has_skip_or_xfail_decorator(test_fn: Node<'_>, source: &str) -> bool {
-    let Some(parent) = test_fn.parent() else {
+    if decorated_definition_has_skip_or_xfail(test_fn.parent(), source) {
+        return true;
+    }
+    if let Some(class) = enclosing_class(test_fn) {
+        if decorated_definition_has_skip_or_xfail(class.parent(), source) {
+            return true;
+        }
+    }
+    false
+}
+
+/// If `maybe_decorated` is a `decorated_definition`, scan its decorators
+/// for any `@pytest.mark.skip` or `@pytest.mark.xfail`.
+fn decorated_definition_has_skip_or_xfail(maybe_decorated: Option<Node<'_>>, source: &str) -> bool {
+    let Some(parent) = maybe_decorated else {
         return false;
     };
     if parent.kind() != "decorated_definition" {
@@ -119,6 +139,22 @@ fn test_has_skip_or_xfail_decorator(test_fn: Node<'_>, source: &str) -> bool {
         }
     }
     false
+}
+
+/// Walk ancestors of a (test) function and return the nearest enclosing
+/// `class_definition`, if any. The method-level decorator gate uses the
+/// function's immediate parent, but a class-level decorator sits on the
+/// `class_definition`'s parent (`decorated_definition`), so we need a
+/// handle on the class node itself.
+fn enclosing_class(node: Node<'_>) -> Option<Node<'_>> {
+    let mut ancestor = node.parent();
+    while let Some(parent) = ancestor {
+        if parent.kind() == "class_definition" {
+            return Some(parent);
+        }
+        ancestor = parent.parent();
+    }
+    None
 }
 
 /// Is `decorator` a `@pytest.mark.skip` / `@pytest.mark.xfail` decorator
@@ -400,6 +436,72 @@ def test_x():
 @pytest.mark.skip(reason=\"todo\")
 def test_x():
     pass
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_method_of_class_decorated_with_pytest_mark_skip() {
+        // Class-level `@pytest.mark.skip` should suppress ZR007 on every
+        // method body inside it — even if the method itself has no
+        // decorator. This is the common placeholder-stub pattern in
+        // ~/git/esl.
+        let src = "\
+@pytest.mark.skip
+class TestX:
+    def test_y(self):
+        pass
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_method_of_class_decorated_with_pytest_mark_xfail() {
+        let src = "\
+@pytest.mark.xfail
+class TestX:
+    def test_y(self):
+        pass
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_method_of_class_decorated_with_pytest_mark_skip_with_reason() {
+        let src = "\
+@pytest.mark.skip(reason=\"todo\")
+class TestX:
+    def test_y(self):
+        pass
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_method_of_class_decorated_with_pytest_mark_skipif() {
+        // `skipif` is conditional — empty bodies inside still flag.
+        let src = "\
+@pytest.mark.skipif(True, reason=\"x\")
+class TestX:
+    def test_y(self):
+        pass
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].code, "ZR007");
+    }
+
+    #[test]
+    fn does_not_fire_when_class_is_decorated_at_method_level_too() {
+        // Both the class and the method carry skip-style decorators.
+        // Each gate independently suppresses; the rule should not fire
+        // and the lookup should not panic.
+        let src = "\
+@pytest.mark.skip
+class TestX:
+    @pytest.mark.skip
+    def test_y(self):
+        pass
 ";
         assert!(run(src).is_empty());
     }
