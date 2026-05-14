@@ -347,10 +347,27 @@ pub(crate) fn is_assertion_helper_name(
 /// (e.g. `(lambda: ...)(...)`, `f[0](...)`).
 pub fn call_final_name<'a>(call_node: Node<'_>, source: &'a str) -> Option<&'a str> {
     let func = call_node.child_by_field_name("function")?;
-    match func.kind() {
-        "identifier" => func.utf8_text(source.as_bytes()).ok(),
+    identifier_or_attribute_tail(func, source)
+}
+
+/// Walk an `identifier` / `attribute` expression to its final identifier
+/// name.
+///
+/// Returns `Some("patch")` for `patch`, `mock.patch`,
+/// `unittest.mock.patch`. Returns `Some("object")` for `patch.object` —
+/// the caller decides whether `object` matters. Returns `None` for
+/// anything more exotic (subscripts, parenthesised expressions, lambdas).
+///
+/// `pub(crate)` so ZR006 (decorator form) and ZR008 (with-item call form)
+/// can share the helper without re-exporting it on the public API. Both
+/// rules need the same "what's the last name in this chain?" lookup but
+/// neither operates on a `call` node directly, which is why this is a
+/// sibling of [`call_final_name`] rather than its only caller.
+pub(crate) fn identifier_or_attribute_tail<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
+    match node.kind() {
+        "identifier" => node.utf8_text(source.as_bytes()).ok(),
         "attribute" => {
-            let attr = func.child_by_field_name("attribute")?;
+            let attr = node.child_by_field_name("attribute")?;
             attr.utf8_text(source.as_bytes()).ok()
         }
         _ => None,

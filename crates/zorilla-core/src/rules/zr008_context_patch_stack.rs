@@ -79,7 +79,7 @@ use std::ops::ControlFlow;
 
 use tree_sitter::Node;
 
-use crate::ast::{iter_test_functions, walk_descendants_pruned};
+use crate::ast::{identifier_or_attribute_tail, iter_test_functions, walk_descendants_pruned};
 use crate::report::{Finding, Severity};
 use crate::rules::{Context, Rule};
 
@@ -218,7 +218,7 @@ fn with_item_is_patch_call(with_item: Node<'_>, source: &str) -> bool {
     let Some(func) = inner.child_by_field_name("function") else {
         return false;
     };
-    final_identifier(func, source) == Some("patch")
+    identifier_or_attribute_tail(func, source) == Some("patch")
 }
 
 /// Locate the value expression of a `with_item`.
@@ -250,24 +250,6 @@ fn as_pattern_value(as_pattern: Node<'_>) -> Option<Node<'_>> {
     let mut cursor = as_pattern.walk();
     let first = as_pattern.named_children(&mut cursor).next();
     first
-}
-
-/// Walk an `identifier` / `attribute` expression to its final identifier
-/// name.
-///
-/// Returns `Some("patch")` for `patch`, `mock.patch`, `unittest.mock.patch`.
-/// Returns `Some("object")` for `patch.object` — caller filters.
-/// Mirrors the helper of the same name inside `zr006_patch_stack.rs`;
-/// kept local to avoid a public-API hoist that no other rule needs yet.
-fn final_identifier<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
-    match node.kind() {
-        "identifier" => node.utf8_text(source.as_bytes()).ok(),
-        "attribute" => {
-            let attr = node.child_by_field_name("attribute")?;
-            attr.utf8_text(source.as_bytes()).ok()
-        }
-        _ => None,
-    }
 }
 
 #[cfg(test)]

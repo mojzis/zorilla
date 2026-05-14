@@ -50,7 +50,7 @@
 
 use tree_sitter::Node;
 
-use crate::ast::iter_test_functions;
+use crate::ast::{identifier_or_attribute_tail, iter_test_functions};
 use crate::report::{Finding, Severity};
 use crate::rules::{Context, Rule};
 
@@ -145,23 +145,7 @@ fn decorator_is_patch(decorator_node: Node<'_>, source: &str) -> bool {
         }
         _ => inner,
     };
-    final_identifier(name_node, source).is_some_and(|n| n == "patch")
-}
-
-/// Walk an `identifier` / `attribute` expression to its final identifier
-/// name.
-///
-/// Returns `Some("patch")` for `patch`, `mock.patch`, `unittest.mock.patch`.
-/// Returns `Some("object")` for `patch.object` — caller filters.
-fn final_identifier<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
-    match node.kind() {
-        "identifier" => node.utf8_text(source.as_bytes()).ok(),
-        "attribute" => {
-            let attr = node.child_by_field_name("attribute")?;
-            attr.utf8_text(source.as_bytes()).ok()
-        }
-        _ => None,
-    }
+    identifier_or_attribute_tail(name_node, source).is_some_and(|n| n == "patch")
 }
 
 #[cfg(test)]
