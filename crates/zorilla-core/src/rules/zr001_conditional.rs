@@ -180,30 +180,30 @@ fn for_body_is_only_asserts(for_node: Node<'_>, source: &str, helpers: &HashSet<
         return false;
     };
     let mut cursor = body.walk();
-    let mut any = false;
-    let all_asserts_or_helpers = body.named_children(&mut cursor).all(|child| {
-        any = true;
-        match child.kind() {
-            "assert_statement" => true,
-            "expression_statement" => {
-                // An `expression_statement` wraps exactly one expression.
-                // We want it to be a `call` whose final identifier is a
-                // known assertion helper.
-                let Some(inner) = child.named_child(0) else {
-                    return false;
-                };
-                if inner.kind() != "call" {
-                    return false;
-                }
-                let Some(name) = call_final_name(inner, source) else {
-                    return false;
-                };
-                helpers.contains(name)
+    let mut children = body.named_children(&mut cursor).peekable();
+    // An empty body is not exempt — `for x in xs: pass` is still a loop.
+    if children.peek().is_none() {
+        return false;
+    }
+    children.all(|child| match child.kind() {
+        "assert_statement" => true,
+        "expression_statement" => {
+            // An `expression_statement` wraps exactly one expression.
+            // We want it to be a `call` whose final identifier is a
+            // known assertion helper.
+            let Some(inner) = child.named_child(0) else {
+                return false;
+            };
+            if inner.kind() != "call" {
+                return false;
             }
-            _ => false,
+            let Some(name) = call_final_name(inner, source) else {
+                return false;
+            };
+            helpers.contains(name)
         }
-    });
-    any && all_asserts_or_helpers
+        _ => false,
+    })
 }
 
 #[cfg(test)]
