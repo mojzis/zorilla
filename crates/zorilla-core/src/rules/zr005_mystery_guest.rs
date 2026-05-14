@@ -66,7 +66,7 @@ use std::ops::ControlFlow;
 
 use tree_sitter::Node;
 
-use crate::ast::{iter_test_functions, walk_descendants};
+use crate::ast::{decorator_chain_segments, iter_test_functions, walk_descendants};
 use crate::report::{Finding, Severity};
 use crate::rules::{Context, Rule};
 
@@ -124,6 +124,9 @@ impl Rule for MysteryGuestRule {
                 if node.kind() == "string"
                     && !is_assert_message(node)
                     && !is_in_test_client_call(node, ctx.source)
+                    && !is_in_mock_attribute_assignment_rhs(node, ctx.source)
+                    && !is_in_response_headers_membership_check(node, ctx.source)
+                    && !is_in_pytest_fixture_function(node, ctx.source)
                 {
                     if let Some(literal) = string_content(node, ctx.source) {
                         if is_mystery_guest(literal)
@@ -319,6 +322,14 @@ fn strip_quotes(raw: &str) -> &str {
 /// Does `literal` (string content, no surrounding quotes) look like a
 /// mystery-guest external resource per the rule's criteria?
 fn is_mystery_guest(literal: &str) -> bool {
+    // SQL comments are written `/* ... */` — they begin with a `/` so
+    // they would otherwise satisfy the absolute-Unix-path branch below.
+    // A literal starting with `/*` is overwhelmingly a SQL or C-style
+    // comment fragment, not an absolute path, so we skip it. parlint's
+    // one ZR005 false-positive on a SQL audit query is this case.
+    if literal.starts_with("/*") {
+        return false;
+    }
     if literal.starts_with('/') {
         return true;
     }
@@ -377,6 +388,215 @@ fn is_assert_message(string_node: Node<'_>) -> bool {
     let mut cursor = parent.walk();
     let named: Vec<Node<'_>> = parent.named_children(&mut cursor).collect();
     named.get(1).is_some_and(|n| n.id() == current.id())
+}
+
+/// Is `string_node` the **RHS** of an `assignment` whose target is an
+/// `attribute` named `return_value` or `side_effect`?
+///
+/// Recognises the canonical mock-configuration shape:
+///
+/// ```python
+/// mock_obj.return_value = "/srv/data/file.txt"
+/// mock_obj.get.return_value = "/api/v1/users"
+/// mock_other.side_effect = "/var/run/socket"
+/// ```
+///
+/// On these assignments the string is **mock setup data**, not a request
+/// target — flagging it produces noise. cteni's 48-hit rollout cluster is
+/// this exact shape. The walk allows any number of `parenthesized_expression`
+/// wrappers around the literal so a trailing parenthesised RHS still
+/// matches.
+fn is_in_mock_attribute_assignment_rhs(string_node: Node<'_>, source: &str) -> bool {
+    // Climb past parentheses so `mock.return_value = ("...")` matches.
+    let mut current = string_node;
+    while let Some(parent) = current.parent() {
+        if parent.kind() == "parenthesized_expression" {
+            current = parent;
+        } else {
+            break;
+        }
+    }
+    let Some(parent) = current.parent() else {
+        return false;
+    };
+    if parent.kind() != "assignment" {
+        return false;
+    }
+    // The string must be the RHS (the `right` field), not the LHS.
+    let Some(rhs) = parent.child_by_field_name("right") else {
+        return false;
+    };
+    if rhs.id() != current.id() {
+        return false;
+    }
+    // The LHS must be an `attribute` whose attribute is `return_value` or
+    // `side_effect`. Chained attributes (`a.b.return_value`) work because
+    // `attribute`'s `attribute` field is always the rightmost name.
+    let Some(target) = parent.child_by_field_name("left") else {
+        return false;
+    };
+    if target.kind() != "attribute" {
+        return false;
+    }
+    let Some(attr) = target.child_by_field_name("attribute") else {
+        return false;
+    };
+    let Ok(name) = attr.utf8_text(source.as_bytes()) else {
+        return false;
+    };
+    matches!(name, "return_value" | "side_effect")
+}
+
+/// Is `string_node` the LHS of an `in` comparison whose RHS is a
+/// subscript over `.headers`, all wrapped in an `assert_statement`?
+///
+/// Recognises `FastAPI` / Starlette header-assertion patterns:
+///
+/// ```python
+/// assert "/foo" in response.headers["location"]
+/// assert "value" in resp.headers["X-Custom"]
+/// ```
+///
+/// The literal here is a **substring check** against the response header
+/// value — it is the expectation being asserted, not a request target.
+/// alma's 2-hit rollout cluster is this shape.
+fn is_in_response_headers_membership_check(string_node: Node<'_>, source: &str) -> bool {
+    // Climb past any `parenthesized_expression` wrappers so
+    // `assert ("/x") in resp.headers["L"]` matches the same as the bare
+    // form.
+    let mut current = string_node;
+    while let Some(parent) = current.parent() {
+        if parent.kind() == "parenthesized_expression" {
+            current = parent;
+        } else {
+            break;
+        }
+    }
+    let Some(comparison) = current.parent() else {
+        return false;
+    };
+    if comparison.kind() != "comparison_operator" {
+        return false;
+    }
+    // tree-sitter-python models `a in b` as a `comparison_operator` with
+    // three children: lhs, the `in` keyword (unnamed), rhs. The named
+    // children are lhs and rhs. We need the string to be the lhs.
+    let mut cursor = comparison.walk();
+    let named: Vec<Node<'_>> = comparison.named_children(&mut cursor).collect();
+    let [lhs, rhs] = named.as_slice() else {
+        return false;
+    };
+    if lhs.id() != current.id() {
+        return false;
+    }
+    // The operator between the two named children must be `in`. Walk
+    // raw children to find the operator token.
+    if !comparison_uses_in_operator(comparison) {
+        return false;
+    }
+    // The RHS must be a `subscript` whose value is an `attribute` chain
+    // ending in `.headers`.
+    if rhs.kind() != "subscript" {
+        return false;
+    }
+    let Some(value) = rhs.child_by_field_name("value") else {
+        return false;
+    };
+    if value.kind() != "attribute" {
+        return false;
+    }
+    let Some(attr) = value.child_by_field_name("attribute") else {
+        return false;
+    };
+    let Ok(name) = attr.utf8_text(source.as_bytes()) else {
+        return false;
+    };
+    if name != "headers" {
+        return false;
+    }
+    // Finally, the comparison must itself be the asserted expression
+    // (the first named child of an `assert_statement`).
+    let Some(assert_stmt) = comparison.parent() else {
+        return false;
+    };
+    if assert_stmt.kind() != "assert_statement" {
+        return false;
+    }
+    let mut cursor = assert_stmt.walk();
+    let mut first = assert_stmt.named_children(&mut cursor);
+    first.next().map(|n| n.id()) == Some(comparison.id())
+}
+
+/// Returns `true` if any of `comparison_operator`'s **unnamed** child
+/// tokens is the keyword `in`. tree-sitter-python represents the
+/// operator token as an unnamed child with `kind() == "in"`.
+fn comparison_uses_in_operator(comparison: Node<'_>) -> bool {
+    let mut cursor = comparison.walk();
+    for child in comparison.children(&mut cursor) {
+        if child.is_named() {
+            continue;
+        }
+        if child.kind() == "in" {
+            return true;
+        }
+    }
+    false
+}
+
+/// Is `string_node` inside the body of a function whose decorator chain
+/// ends in `fixture` (i.e. `@pytest.fixture` or a bare `@fixture` alias)?
+///
+/// Recognises the pattern of a pytest fixture function that returns
+/// fixture data — strings in such a body are documentation / sample data,
+/// not request targets. The `projects` corpus has a handful of these
+/// (top-level `@pytest.fixture` functions returning dataclasses with
+/// hard-coded GitHub URLs).
+///
+/// Note: `iter_test_functions` only iterates `test_*`-named functions, so
+/// today most fixture functions are not even visited by ZR005. This
+/// carve-out is intentionally a belt-and-braces guard that also handles
+/// any future widening of the iterated set, and locks in the principle
+/// that "string in a fixture body is not a mystery guest".
+///
+/// Matches the chain length being exactly 1 (`@fixture`) or 2
+/// (`@pytest.fixture`); other shapes are not common enough in practice to
+/// warrant matching.
+fn is_in_pytest_fixture_function(string_node: Node<'_>, source: &str) -> bool {
+    let mut ancestor = string_node.parent();
+    while let Some(node) = ancestor {
+        if node.kind() == "function_definition" {
+            return function_has_pytest_fixture_decorator(node, source);
+        }
+        ancestor = node.parent();
+    }
+    false
+}
+
+/// Does the `function_definition` `fn_node` sit inside a
+/// `decorated_definition` parent whose decorator chain ends in
+/// `fixture` (i.e. `@pytest.fixture` or a bare `@fixture`)?
+fn function_has_pytest_fixture_decorator(fn_node: Node<'_>, source: &str) -> bool {
+    let Some(parent) = fn_node.parent() else {
+        return false;
+    };
+    if parent.kind() != "decorated_definition" {
+        return false;
+    }
+    let mut cursor = parent.walk();
+    for child in parent.named_children(&mut cursor) {
+        if child.kind() != "decorator" {
+            continue;
+        }
+        let segments = decorator_chain_segments(child, source);
+        // `@fixture` (segments = ["fixture"]) or `@pytest.fixture`
+        // (segments = ["pytest", "fixture"]). Deeper chains
+        // (`@foo.bar.fixture`) are unusual enough to leave to a future
+        // extension if needed.
+        if matches!(segments.as_slice(), ["fixture"] | ["pytest", "fixture"]) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Truncate `s` to at most `max` characters, appending `...` when we cut.
@@ -776,6 +996,148 @@ class TestAdmin:
         assert resp.ok
 ";
         assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_sql_comment_literal() {
+        // `/* ... */` is a SQL / C-style comment. parlint had one ZR005
+        // hit on a SQL audit query — silence it.
+        let src = "\
+def test_query():
+    sql = \"/* warm up cache */ SELECT 1\"
+    assert sql
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_mock_return_value_assignment_rhs() {
+        // cteni's 48-hit pattern: configuring `.return_value` with a
+        // path string is mock setup, not a request target.
+        let src = "\
+def test_uses_mock():
+    mock_repo.return_value = \"/srv/data/file.txt\"
+    assert mock_repo.return_value
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_chained_attribute_return_value_rhs() {
+        // The carve-out works for chained attributes too —
+        // `a.b.return_value = "..."` — since `attribute`'s `attribute`
+        // field always points at the rightmost name.
+        let src = "\
+def test_uses_chain():
+    mock_obj.get.return_value = \"/api/v1/users\"
+    assert mock_obj.get.return_value
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_mock_side_effect_assignment_rhs() {
+        let src = "\
+def test_uses_side_effect():
+    mock_obj.side_effect = \"/var/run/socket\"
+    assert mock_obj.side_effect
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_mock_other_attribute_assignment_rhs() {
+        // Only `return_value` and `side_effect` are carved out — other
+        // attribute names (`.url`, `.path`, …) still fire. Locks in the
+        // narrow scope.
+        let src = "\
+def test_uses_url_attr():
+    mock_obj.url = \"/srv/data/file.txt\"
+    assert mock_obj.url
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].message.contains("/srv/data/file.txt"));
+    }
+
+    #[test]
+    fn does_not_fire_on_header_assertion_substring_check() {
+        // alma's 2-hit pattern: `assert "..." in response.headers["..."]`.
+        let src = "\
+def test_redirect_target():
+    resp = client.get(\"/login\")
+    assert \"/dashboard\" in resp.headers[\"location\"]
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_membership_check_when_rhs_is_not_headers_subscript() {
+        // The header-assertion carve-out requires the RHS of `in` to be
+        // a `.headers[...]` subscript. When the RHS is something else
+        // (e.g. a list literal), the literal still fires — the carve-out
+        // is narrowly scoped to the actual FastAPI / Starlette header
+        // pattern.
+        let src = "\
+def test_in_list_of_urls():
+    assert \"/dashboard\" in [\"https://example.com/x\", \"/dashboard\"]
+";
+        let out = run(src);
+        // Three string literals trip the path/URL prefix: `/dashboard`
+        // on the LHS, `https://…` and `/dashboard` inside the list.
+        // None are silenced because the RHS subscript-on-`.headers`
+        // shape is not present.
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn does_not_fire_on_string_inside_pytest_fixture_function() {
+        // `@pytest.fixture` function bodies hold fixture data, not
+        // request targets. Note this is forward-compat: today's
+        // `iter_test_functions` filter already skips fixtures, but the
+        // carve-out locks in the principle.
+        //
+        // Inside the fixture, we deliberately *name* the function
+        // `test_data` (starts with `test_`) so it IS visited by
+        // `iter_test_functions`. The carve-out must still kick in.
+        let src = "\
+import pytest
+
+@pytest.fixture
+def test_data():
+    return \"https://api.example.com/fixture\"
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_bare_fixture_alias() {
+        // `from pytest import fixture` lets users decorate with bare
+        // `@fixture`. The carve-out matches that shape too.
+        let src = "\
+from pytest import fixture
+
+@fixture
+def test_data():
+    return \"https://api.example.com/fixture\"
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_url_in_regular_test_function_not_fixture() {
+        // Sanity guard: a URL literal in a normal `test_*` function
+        // (NOT decorated with `@pytest.fixture`) still fires. The
+        // case-4 carve-out is scoped exactly to fixture bodies and
+        // must not leak into regular tests.
+        let src = "\
+def test_uses_url_inline():
+    repo = build_repo(url=\"https://github.com/owner/repo\")
+    assert repo
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].message.contains("https://github.com/owner/repo"));
     }
 
     #[test]
