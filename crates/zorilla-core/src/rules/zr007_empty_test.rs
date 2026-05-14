@@ -428,6 +428,22 @@ def test_x():
     }
 
     #[test]
+    fn fires_on_four_segment_decorator_chain_ending_in_skip() {
+        // `@some.pkg.pytest.mark.skip` is a 5-segment chain that happens
+        // to end in `skip`. The gate is exact-length-3 against
+        // `["pytest", "mark", "skip"]`, so the rule must still fire.
+        // Locks in the brief's "deeper chains must NOT match" requirement.
+        let src = "\
+@some.pytest.mark.skip
+def test_x():
+    pass
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].code, "ZR007");
+    }
+
+    #[test]
     fn does_not_fire_on_pytest_mark_skip_among_other_decorators() {
         // When a stack contains both an unrelated decorator and a
         // `@pytest.mark.skip`, the skip still short-circuits.

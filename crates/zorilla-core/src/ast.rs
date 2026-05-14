@@ -704,6 +704,46 @@ def test_x():
     }
 
     #[test]
+    fn decorator_chain_segments_handles_four_segment_chain() {
+        // `@a.b.c.d` — four segments. ZR007's gate matches length-3 only,
+        // so this MUST come back as a four-element Vec so the caller's
+        // exact-length match correctly rejects it. Locks in the
+        // "any deeper chain is preserved verbatim, not truncated" promise.
+        let src = "\
+@a.b.c.d
+def test_x():
+    pass
+";
+        let tree = parse(src).unwrap();
+        let decorator = first_decorator(&tree);
+        assert_eq!(decorator_chain_segments(decorator, src), vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn decorator_chain_segments_returns_empty_for_subscripted_decorator() {
+        // `@mark[skip]` — a subscript expression is not a recognizable
+        // identifier/attribute chain. The helper must return an empty
+        // `Vec` (and crucially must NOT panic). This is the documented
+        // contract for unrecognised decorator shapes.
+        //
+        // Note: tree-sitter's Python grammar may or may not accept this
+        // as valid; the rule cares only that we don't crash and that
+        // callers see an empty chain.
+        let src = "\
+@mark[skip]
+def test_x():
+    pass
+";
+        let tree = parse(src).unwrap();
+        let decorator = first_decorator(&tree);
+        assert!(
+            decorator_chain_segments(decorator, src).is_empty(),
+            "subscripted decorator must return an empty Vec, got {:?}",
+            decorator_chain_segments(decorator, src)
+        );
+    }
+
+    #[test]
     fn iter_yields_every_test_function_in_source_order() {
         let src = "\
 def test_a():
