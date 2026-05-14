@@ -81,8 +81,15 @@ const MESSAGE_LITERAL_MAX: usize = 80;
 /// (or `self.<receiver>.<method>`) whose `<method>` is an HTTP verb is
 /// treated as a `TestClient` route reference — the first positional
 /// string argument is a fixture-like route path, not a mystery guest.
+///
+/// In addition to this literal list, any identifier ending in `_client`
+/// (e.g. `admin_client`, `kube_client`, `service_client`) is also
+/// recognised as a `TestClient` receiver — see [`matches_receiver`].
+/// Deliberately omitted: browser-automation receivers like `e2e`, `page`,
+/// `browser`. Suites using those paradigms should reach for
+/// `# zorilla: ignore-file[ZR005]`.
 const RECEIVER_NAMES: &[&str] =
-    &["client", "http", "test_client", "app", "api", "async_client", "ac"];
+    &["client", "http", "test_client", "app", "api", "async_client", "ac", "authenticated_client"];
 
 /// HTTP verb method names accepted by the `TestClient` heuristic.
 const HTTP_METHODS: &[&str] =
@@ -207,15 +214,17 @@ fn is_in_test_client_call(string_node: Node<'_>, source: &str) -> bool {
 }
 
 /// Does `object` name a TestClient-style receiver? Accepts either a bare
-/// identifier in `RECEIVER_NAMES` or an `attribute` of the form
-/// `self.<receiver>` where `<receiver>` is in `RECEIVER_NAMES`.
+/// identifier or an `attribute` of the form `self.<receiver>`. The
+/// identifier matches when it is listed in `RECEIVER_NAMES` OR when it
+/// ends with the `_client` suffix (the underscore is required — see
+/// [`is_receiver_name`]).
 fn matches_receiver(object: Node<'_>, source: &str) -> bool {
     match object.kind() {
         "identifier" => {
             let Ok(name) = object.utf8_text(source.as_bytes()) else {
                 return false;
             };
-            RECEIVER_NAMES.contains(&name)
+            is_receiver_name(name)
         }
         "attribute" => {
             // `self.<receiver>` — the `object` field is the identifier
@@ -238,10 +247,20 @@ fn matches_receiver(object: Node<'_>, source: &str) -> bool {
             let Ok(name) = attr.utf8_text(source.as_bytes()) else {
                 return false;
             };
-            RECEIVER_NAMES.contains(&name)
+            is_receiver_name(name)
         }
         _ => false,
     }
+}
+
+/// An identifier counts as a `TestClient` receiver if it matches a literal
+/// in `RECEIVER_NAMES` OR ends with the suffix `_client`. The underscore
+/// separator is required: `clientmgr` does not match, but `admin_client`
+/// and `kube_client` do. This generalises rollout-discovered receivers
+/// (`authenticated_client`, `admin_client`, `kube_client`, …) without
+/// inflating the literal list.
+fn is_receiver_name(name: &str) -> bool {
+    RECEIVER_NAMES.contains(&name) || name.ends_with("_client")
 }
 
 /// Extract the *content* of a tree-sitter `string` node — the text inside
@@ -707,6 +726,57 @@ def test_misc():
         let src = "\
 def test_weird():
     resp = client.weirdmethod(\"/x\")
+    assert resp.ok
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].message.contains("/x"));
+    }
+
+    #[test]
+    fn does_not_fire_on_authenticated_client_get() {
+        // `authenticated_client` is the canonical pytest fixture name in
+        // alma / esl test suites — exercise the literal-list addition.
+        let src = "\
+def test_lists_users():
+    resp = authenticated_client.get(\"/api/users\")
+    assert resp.ok
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_suffix_match_kube_client_get() {
+        // `*_client` suffix match — `kube_client` is not in the literal
+        // list but should still be recognised as a TestClient receiver.
+        let src = "\
+def test_lists_pods():
+    resp = kube_client.get(\"/api/v1/pods\")
+    assert resp.ok
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_self_admin_client_post() {
+        // Suffix match also applies through `self.<X>`.
+        let src = "\
+class TestAdmin:
+    def test_creates(self):
+        resp = self.admin_client.post(\"/items\", json={\"x\": 1})
+        assert resp.ok
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_client_like_name_without_underscore_client_suffix() {
+        // `clientmgr` ends with `client` but NOT with `_client` — the
+        // suffix matcher requires the underscore separator, so this
+        // still fires.
+        let src = "\
+def test_mgr():
+    resp = clientmgr.get(\"/x\")
     assert resp.ok
 ";
         let out = run(src);
