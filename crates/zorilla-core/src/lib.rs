@@ -199,11 +199,14 @@ mod tests {
         let tests = tmp.path().join("tests");
         std::fs::create_dir_all(&tests).unwrap();
         // Two test functions with conditionals at offending-statement
-        // lines 2 and 6.
+        // lines 2 and 6. The second test uses a `while` rather than a
+        // `for` because Phase 2 introduced an exemption for `for` loops
+        // whose body is only bare/helper asserts — keeping that
+        // exemption out of this sort-order regression test.
         std::fs::write(
             tests.join("test_b.py"),
             "def test_b1():\n    if True:\n        assert True\n\n\
-             def test_b2():\n    for i in (1,):\n        assert i\n",
+             def test_b2():\n    while True:\n        assert True\n        break\n",
         )
         .unwrap();
         // One test function with a conditional on line 2.
