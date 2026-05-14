@@ -306,6 +306,10 @@ fn classify_assert_hit<'tree>(
 
 /// Does `name` look like an assertion-helper identifier?
 ///
+/// Internal helper for [`classify_assert_hit`]; `pub(crate)` so the
+/// rules layer can reuse it in tests / future helper-call rules
+/// without re-exporting it publicly.
+///
 /// Two complementary checks:
 ///
 /// 1. **Exact match** against the caller-supplied `helpers` set. This is
@@ -315,12 +319,18 @@ fn classify_assert_hit<'tree>(
 ///    `_assert_` (the latter covering private helpers like
 ///    `_assert_invariant`). This branch is universal Python testing
 ///    convention (`assert_called_with`, `assert_css_class_present`, …).
+///    The check is exactly `name.starts_with("assert_") ||
+///    name.starts_with("_assert_")` — the trailing underscore is
+///    deliberate so we don't catch unrelated identifiers like
+///    `assertion` or `assertively`.
 ///
 /// Both branches are gated on `helpers.is_some()`. Callers that pass
-/// `None` (e.g. ZR004's bare-assert counter) get a hard `false`: they
-/// only care about `assert_statement` nodes, not helper calls, and must
-/// remain unaffected by helper-name heuristics.
-fn is_assertion_helper_name(
+/// `None` (e.g. ZR004's bare-assert counter via
+/// [`count_bare_asserts_with_first`]) get a hard `false`: they only care
+/// about `assert_statement` nodes, not helper calls, and must remain
+/// unaffected by helper-name heuristics. The gate is what preserves
+/// ZR004's semantics across this extension.
+pub(crate) fn is_assertion_helper_name(
     name: &str,
     helpers: Option<&std::collections::HashSet<String>>,
 ) -> bool {

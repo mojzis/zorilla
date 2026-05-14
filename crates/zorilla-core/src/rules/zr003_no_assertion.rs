@@ -11,6 +11,12 @@
 //! - a call whose function's final identifier is a known assertion
 //!   helper (see `DEFAULT_ZR003_HELPERS` in [`crate::config`]) or an
 //!   entry in the user's `[tool.zorilla.rules.ZR003] extra_helpers`;
+//! - a call whose function's final identifier starts with `assert_` or
+//!   `_assert_` (snake-case helper convention — `assert_called_with`,
+//!   `_assert_invariant`). The trailing underscore is required, so
+//!   `assertion(x)` does not count. This shape is recognized
+//!   unconditionally; users do not need to list these in
+//!   `extra_helpers`;
 //! - a `with <expr>.raises(...)` / `with <expr>.warns(...)` context
 //!   manager (matched by final identifier — so `pytest.raises(...)`,
 //!   `self.assertRaises(...)`, and any custom `foo.raises(...)` all
@@ -286,6 +292,9 @@ def test_calls_assertion():
         let out = run(src);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].code, "ZR003");
+        assert_eq!(out[0].message, MESSAGE);
+        assert_eq!(out[0].line, 1);
+        assert_eq!(out[0].column, 1);
     }
 
     #[test]
