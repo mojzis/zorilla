@@ -9,9 +9,9 @@
 //! (`@pytest.mark.parametrize`) or separate tests instead.
 //!
 //! This rule fires **once per test function** whose body contains any
-//! `if_statement`, `for_statement`, `while_statement`, or `try_statement`
-//! at the outer scope. The reported location is the first offending
-//! statement in source order.
+//! `if_statement`, `for_statement`, `while_statement`, `try_statement`,
+//! or `match_statement` at the outer scope. The reported location is
+//! the first offending statement in source order.
 //!
 //! ## Refinements
 //!
@@ -68,9 +68,7 @@ use std::ops::ControlFlow;
 
 use tree_sitter::Node;
 
-use crate::ast::{
-    call_final_name, has_any_assert, iter_test_functions, walk_descendants, walk_descendants_pruned,
-};
+use crate::ast::{call_final_name, iter_test_functions, walk_descendants_pruned};
 use crate::report::{Finding, Severity};
 use crate::rules::{Context, Rule};
 
@@ -103,13 +101,18 @@ impl Rule for ConditionalRule {
                 continue;
             };
             // Pre-compute whether the enclosing test function body contains
-            // *any* assert-shaped construct anywhere. The cleanup-loop
-            // downgrade ([`for_body_is_pure_cleanup_in_assertless_test`])
-            // only applies when this is `false` — a `for` over plain calls
-            // is exempt only inside a mis-named "fixture" test that does no
-            // asserting at all (e.g. alma's `def test_env(): ...; for k in
-            // KEYS: os.environ.pop(k)`).
-            let test_body_has_asserts = has_any_assert(body, ctx.source, helpers);
+            // *any* assert-shaped construct anywhere — but only at the
+            // outer test's scope. The cleanup-loop downgrade
+            // ([`for_body_is_pure_cleanup`]) only applies when this is
+            // `false`: a `for` over plain calls is exempt only inside a
+            // mis-named "fixture" test that does no asserting at all
+            // (e.g. alma's `def test_env(): ...; for k in KEYS:
+            // os.environ.pop(k)`). The walk skips nested
+            // `function_definition` / `lambda` subtrees to match the rest
+            // of the rule's posture — an assert inside an inline helper
+            // does not invalidate the cleanup shape any more than control
+            // flow inside that helper triggers the rule.
+            let test_body_has_asserts = outer_test_body_has_assert(body, ctx.source, helpers);
             if let Some(offender) =
                 find_first_conditional(body, ctx.source, helpers, test_body_has_asserts)
             {
@@ -139,18 +142,19 @@ impl Rule for ConditionalRule {
 ///   ([`has_except_clause`]). A `try` / `finally` with no `except` is
 ///   cleanup, not branching.
 /// - `for_statement` is skipped when its body matches
-///   [`for_body_is_only_asserts`]: at least one assert-bearing
-///   statement, with only plain assignments interleaved and no control
-///   flow at any nesting level. That's a parametrize-substitute, not
-///   branching.
+///   [`for_body_is_parametrize_substitute`]: at least one
+///   assert-bearing statement, with only plain assignments interleaved
+///   and no control flow at any nesting level. That's a
+///   parametrize-substitute, not branching.
 /// - `for_statement` is also skipped — only when the enclosing test
 ///   body contains no asserts anywhere — by
 ///   [`for_body_is_pure_cleanup`]: a loop of plain call statements /
 ///   assignments inside a mis-named fixture-shaped test. Caller passes
 ///   `test_body_has_asserts` so this downgrade is disabled the moment
 ///   any assert appears in the enclosing test.
-/// - `if_statement` and `while_statement` always fire when found at the
-///   outer scope.
+/// - `if_statement`, `while_statement`, and `match_statement` always
+///   fire when found at the outer scope. (PEP 634 structural pattern
+///   matching is multi-branch flow by definition.)
 fn find_first_conditional<'tree>(
     body: Node<'tree>,
     source: &str,
@@ -161,7 +165,7 @@ fn find_first_conditional<'tree>(
         body,
         |n| !matches!(n.kind(), "function_definition" | "lambda"),
         |node| match node.kind() {
-            "if_statement" | "while_statement" => ControlFlow::Break(node),
+            "if_statement" | "while_statement" | "match_statement" => ControlFlow::Break(node),
             "try_statement" => {
                 if has_except_clause(node) {
                     ControlFlow::Break(node)
@@ -170,7 +174,7 @@ fn find_first_conditional<'tree>(
                 }
             }
             "for_statement" => {
-                if for_body_is_only_asserts(node, source, helpers) {
+                if for_body_is_parametrize_substitute(node, source, helpers) {
                     ControlFlow::Continue(())
                 } else if !test_body_has_asserts && for_body_is_pure_cleanup(node) {
                     // The enclosing test function has no asserts anywhere —
@@ -192,11 +196,59 @@ fn find_first_conditional<'tree>(
     }
 }
 
+/// Like [`crate::ast::has_any_assert`] but pruned: nested
+/// `function_definition` and `lambda` subtrees are skipped during the
+/// walk. Used by the cleanup-loop downgrade so an assert *inside an
+/// inline helper* doesn't count as the test asserting anything —
+/// consistent with `find_first_conditional`, which already treats those
+/// subtrees as opaque.
+fn outer_test_body_has_assert(body: Node<'_>, source: &str, helpers: &HashSet<String>) -> bool {
+    walk_descendants_pruned(
+        body,
+        |n| !matches!(n.kind(), "function_definition" | "lambda"),
+        |node| {
+            if is_assert_shaped(node, source, helpers) {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        },
+    )
+    .is_break()
+}
+
+/// Is `node` one of the three assert-shaped node kinds the rest of
+/// `zorilla` recognises — a bare/message `assert_statement`, a `call`
+/// to a known assertion helper, or a `with` over `pytest.raises` /
+/// `assertRaises` / `assertWarns` / `pytest.warns` (or their *Regex
+/// variants)? Mirrors `crate::ast::classify_assert_hit` but inline so
+/// the pruned walk above can short-circuit on the first hit.
+fn is_assert_shaped(node: Node<'_>, source: &str, helpers: &HashSet<String>) -> bool {
+    match node.kind() {
+        "assert_statement" => true,
+        "call" => call_final_name(node, source)
+            .is_some_and(|name| helpers.contains(name) || is_helper_prefix(name)),
+        "with_statement" => with_item_is_assertion_context_manager(node, source),
+        _ => false,
+    }
+}
+
+/// Universal-Python-testing-convention prefix check, mirroring
+/// `ast::is_assertion_helper_name`'s second branch. Catches the
+/// `assert_called_with` / `_assert_invariant` family that the built-in
+/// helper set doesn't enumerate explicitly.
+fn is_helper_prefix(name: &str) -> bool {
+    name.starts_with("assert_") || name.starts_with("_assert_")
+}
+
 /// Does `try_node` (a `try_statement`) carry at least one
 /// `except_clause` named child? `try` / `finally` without an `except`
 /// is cleanup, not branching.
 fn has_except_clause(try_node: Node<'_>) -> bool {
     let mut cursor = try_node.walk();
+    // The `let found = …; found` shape is deliberate: `named_children`
+    // borrows `cursor`, and a bare tail expression here would drop the
+    // cursor while the iterator's destructor still references it.
     let found = try_node.named_children(&mut cursor).any(|child| child.kind() == "except_clause");
     found
 }
@@ -205,6 +257,9 @@ fn has_except_clause(try_node: Node<'_>) -> bool {
 /// — bare/message `assert_statement`s, or assertion-helper calls — with
 /// **simple assignments and comments allowed in between**, optionally
 /// wrapped in transparent `with` blocks, and no control-flow nodes?
+/// (The name reflects the *semantic* shape: a loop that substitutes
+/// for `@pytest.mark.parametrize`. The exact set of accepted body
+/// statements is the union enumerated below.)
 ///
 /// This is the parametrize-by-loop pattern (`for case in cases: assert
 /// case.ok`) and its close relatives where the body computes a local
@@ -229,7 +284,11 @@ fn has_except_clause(try_node: Node<'_>) -> bool {
 /// descendants because a top-level-only check would miss things like a
 /// nested `if` inside an inner expression-statement that wraps an
 /// assignment.
-fn for_body_is_only_asserts(for_node: Node<'_>, source: &str, helpers: &HashSet<String>) -> bool {
+fn for_body_is_parametrize_substitute(
+    for_node: Node<'_>,
+    source: &str,
+    helpers: &HashSet<String>,
+) -> bool {
     let Some(body) = for_node.child_by_field_name("body") else {
         return false;
     };
@@ -249,7 +308,7 @@ fn for_body_is_only_asserts(for_node: Node<'_>, source: &str, helpers: &HashSet<
 
     let mut has_assertion = false;
     for child in &children {
-        match classify_assert_or_assignment(*child, source, helpers) {
+        match classify_for_body_statement(*child, source, helpers) {
             BodyStatement::Assertion => has_assertion = true,
             BodyStatement::Assignment | BodyStatement::Comment => {}
             BodyStatement::Other => return false,
@@ -303,8 +362,8 @@ fn for_body_is_pure_cleanup(for_node: Node<'_>) -> bool {
     })
 }
 
-/// Classification used by [`for_body_is_only_asserts`] for each
-/// top-level statement of the loop body.
+/// Classification used by [`for_body_is_parametrize_substitute`] for
+/// each top-level statement of the loop body.
 enum BodyStatement {
     /// Bare/message `assert_statement`, `expression_statement` wrapping
     /// a call to a known assertion helper, or a `with_statement` whose
@@ -313,7 +372,10 @@ enum BodyStatement {
     Assertion,
     /// `expression_statement` wrapping `assignment` / `augmented_assignment`
     /// (or, defensively, the unwrapped form), or a `with_statement`
-    /// whose body is entirely assignments and/or comments.
+    /// whose body is entirely assignments and/or comments. Transparent
+    /// for the for-of-asserts shape: the loop still needs at least one
+    /// `Assertion` somewhere in its body, but Assignments don't count
+    /// against it.
     Assignment,
     /// Tree-sitter exposes `# ...` as a named `comment` child. Treated
     /// as transparent — neither asserts nor disqualifies — so the
@@ -324,7 +386,7 @@ enum BodyStatement {
     Other,
 }
 
-fn classify_assert_or_assignment(
+fn classify_for_body_statement(
     node: Node<'_>,
     source: &str,
     helpers: &HashSet<String>,
@@ -357,7 +419,7 @@ fn classify_assert_or_assignment(
     }
 }
 
-/// Classify a `with_statement` for [`for_body_is_only_asserts`].
+/// Classify a `with_statement` for [`for_body_is_parametrize_substitute`].
 ///
 /// A `with` block is treated as transparent for the for-of-asserts
 /// downgrade in two situations:
@@ -375,7 +437,7 @@ fn classify_assert_or_assignment(
 ///
 /// Recursion: nested `with` (`with a: with b: assert x`) is handled
 /// because classifying the inner `with` re-enters this function via
-/// [`classify_assert_or_assignment`].
+/// [`classify_for_body_statement`].
 ///
 /// Returns:
 /// - `Assertion` if the with-item is assertion-shaped, OR if every
@@ -408,7 +470,7 @@ fn classify_with_statement(
     let mut has_assertion = false;
     let mut has_non_comment = false;
     for child in &children {
-        match classify_assert_or_assignment(*child, source, helpers) {
+        match classify_for_body_statement(*child, source, helpers) {
             BodyStatement::Assertion => {
                 has_assertion = true;
                 has_non_comment = true;
@@ -440,50 +502,81 @@ fn classify_with_statement(
 /// Used by [`classify_with_statement`] to treat such `with` blocks as
 /// a single assertion for the for-of-asserts downgrade — the context
 /// manager is itself the assertion, regardless of body content.
+///
+/// Implementation note: only `with_node`'s direct `with_clause` /
+/// `with_item` children are inspected. A nested
+/// `with self.assertRaises(...):` inside the body must not promote the
+/// outer `with` to "is an assertion context manager" — that would be a
+/// classification error (and would mask disqualifying content inside
+/// the nested `with`'s body from the body-recursion path).
 fn with_item_is_assertion_context_manager(with_node: Node<'_>, source: &str) -> bool {
-    let mut found = false;
-    let _ = walk_descendants::<()>(with_node, |node| {
-        if node.kind() == "with_item" {
-            let _ = walk_descendants::<()>(node, |inner| {
-                if inner.kind() == "call" {
-                    if let Some(name) = call_final_name(inner, source) {
-                        if matches!(
-                            name,
-                            "assertRaises"
-                                | "assertWarns"
-                                | "assertRaisesRegex"
-                                | "assertWarnsRegex"
-                                | "raises"
-                                | "warns"
-                        ) {
-                            found = true;
-                            return ControlFlow::Break(());
-                        }
+    let mut cursor = with_node.walk();
+    for clause in with_node.named_children(&mut cursor) {
+        // tree-sitter Python exposes the with-clause as either a
+        // `with_clause` wrapping one or more `with_item`s, or — in some
+        // grammars — `with_item`s directly under the `with_statement`.
+        // Handle both shapes.
+        match clause.kind() {
+            "with_clause" => {
+                let mut inner_cursor = clause.walk();
+                for item in clause.named_children(&mut inner_cursor) {
+                    if item.kind() == "with_item"
+                        && with_item_value_is_raises_or_warns(item, source)
+                    {
+                        return true;
                     }
                 }
-                ControlFlow::Continue(())
-            });
-            if found {
-                return ControlFlow::Break(());
             }
+            "with_item" => {
+                if with_item_value_is_raises_or_warns(clause, source) {
+                    return true;
+                }
+            }
+            // The `body` field and any other named children are
+            // explicitly skipped.
+            _ => {}
         }
-        ControlFlow::Continue(())
+    }
+    false
+}
+
+/// Does `with_item`'s value (the expression after `with` / `as`) call
+/// one of the assertion-shaped context-manager names?
+fn with_item_value_is_raises_or_warns(with_item: Node<'_>, source: &str) -> bool {
+    let value = with_item.child_by_field_name("value").unwrap_or_else(|| {
+        // Some grammar revisions expose the call directly as the first
+        // (and only) named child of `with_item` rather than via a
+        // `value` field. Fall back to that.
+        with_item.named_child(0).unwrap_or(with_item)
     });
-    found
+    if value.kind() != "call" {
+        return false;
+    }
+    let Some(name) = call_final_name(value, source) else {
+        return false;
+    };
+    matches!(
+        name,
+        "assertRaises"
+            | "assertWarns"
+            | "assertRaisesRegex"
+            | "assertWarnsRegex"
+            | "raises"
+            | "warns"
+    )
 }
 
 /// Does any descendant of `body` (skipping nested `function_definition`
 /// / `lambda` subtrees) carry a control-flow kind name? Used by both
-/// for-body downgrades to refuse loops with `if`/`while`/`for`/`try`
-/// inside them.
+/// for-body downgrades to refuse loops with `if` / `while` / `for` /
+/// `try` / `match` inside them.
 fn loop_body_has_control_flow(body: Node<'_>) -> bool {
     walk_descendants_pruned(
         body,
         |n| !matches!(n.kind(), "function_definition" | "lambda"),
         |node| match node.kind() {
-            "if_statement" | "while_statement" | "for_statement" | "try_statement" => {
-                ControlFlow::Break(())
-            }
+            "if_statement" | "while_statement" | "for_statement" | "try_statement"
+            | "match_statement" => ControlFlow::Break(()),
             _ => ControlFlow::Continue(()),
         },
     )
@@ -891,6 +984,89 @@ class TestSomething:
             with self.subTest(case=case):
                 with self.subTest(inner=True):
                     self.assertEqual(case, case)
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_test_with_match_statement() {
+        // PEP 634 structural pattern matching is multi-branch flow by
+        // definition. tree-sitter Python exposes it as `match_statement`.
+        // ZR001's stated intent ("test should be linear arrange / act /
+        // assert") applies as much to `match` as to `if`.
+        let src = "\
+def test_top_match():
+    match x:
+        case 1:
+            assert x == 1
+        case _:
+            assert False
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].code, "ZR001");
+        assert_eq!(out[0].line, 2);
+    }
+
+    #[test]
+    fn fires_on_for_loop_with_match_statement_inside_with() {
+        // The for-of-asserts downgrade's `loop_body_has_control_flow`
+        // walk must also catch `match_statement` — otherwise a `match`
+        // inside an asserting `with` body would qualify the loop.
+        let src = "\
+class TestSomething:
+    def test_each_case(self):
+        for case in self.cases:
+            with self.subTest(case=case):
+                match case:
+                    case 1:
+                        self.assertEqual(case, 1)
+                    case _:
+                        self.fail()
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        // The outer for_statement fires (first conditional in the body).
+        assert_eq!(out[0].line, 3);
+    }
+
+    #[test]
+    fn cleanup_downgrade_ignores_assert_inside_nested_helper() {
+        // An assert *inside an inline helper* shouldn't count toward
+        // the enclosing test's assertion content — the outer test is
+        // still doing pure cleanup. Consistent with the rule's posture
+        // that nested-def subtrees are opaque to ZR001.
+        let src = "\
+def test_env():
+    def _check():
+        assert True
+
+    for k in KEYS:
+        cleanup(k)
+";
+        // No control flow at the outer scope: nested def is pruned, and
+        // the cleanup loop qualifies because the outer test has no
+        // assert at the outer scope.
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn outer_non_assertion_with_around_inner_assertion_with_is_classified_correctly() {
+        // Defensive: the outer `with somecontext():` is *not* itself
+        // an assertion context manager, so it must be classified by
+        // recursing into its body. The previous implementation walked
+        // the entire subtree from `with_node` and would incorrectly
+        // see the *inner* `with self.assertRaises(...)` as the outer
+        // with-item, masking the body. The current direct-child walk
+        // gets this right — and because the inner with body is a
+        // single call, the for loop is still a parametrize-substitute.
+        let src = "\
+class TestSomething:
+    def test_each_case(self):
+        for case in self.cases:
+            with somecontext():
+                with self.assertRaises(ValueError):
+                    do(case)
 ";
         assert!(run(src).is_empty());
     }
