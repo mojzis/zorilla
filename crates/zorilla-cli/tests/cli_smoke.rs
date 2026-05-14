@@ -655,6 +655,152 @@ fn overview_on_empty_directory_is_clean_and_exits_zero() {
 }
 
 #[test]
+fn check_changed_lines_in_range_finding_is_visible() {
+    // ZR001 fires on line 2 (`if True`) of the test function. A
+    // manifest covering line 2 must let the finding through. We pass
+    // the file's absolute path in the manifest so it matches the
+    // discovery walker's emitted path verbatim.
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("test_changed.py");
+    std::fs::write(&file, "def test_x():\n    if True:\n        assert True\n").unwrap();
+
+    let manifest = tmp.path().join("manifest.txt");
+    std::fs::write(&manifest, format!("{}:1-3\n", file.display())).unwrap();
+
+    Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg("--changed-lines")
+        .arg(&manifest)
+        .arg(&file)
+        .assert()
+        .code(1)
+        .stdout(contains("ZR001"))
+        .stdout(contains("1 findings in 1 files discovered."));
+}
+
+#[test]
+fn check_changed_lines_out_of_range_finding_is_filtered() {
+    // Same file, but the manifest only covers line 1 — outside the
+    // line-2 ZR001 hit. The finding must be filtered out so the run
+    // exits 0 with zero findings (but still reports 1 file discovered
+    // because filtering happens post-lint).
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("test_filtered.py");
+    std::fs::write(&file, "def test_x():\n    if True:\n        assert True\n").unwrap();
+
+    let manifest = tmp.path().join("manifest.txt");
+    std::fs::write(&manifest, format!("{}:1-1\n", file.display())).unwrap();
+
+    Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg("--changed-lines")
+        .arg(&manifest)
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(contains("0 findings in 1 files discovered."));
+}
+
+#[test]
+fn check_changed_lines_conflicts_with_files_from() {
+    // clap-level conflict: `--changed-lines` and `--files-from` are
+    // mutually exclusive. clap exits 2 with a usage error on stderr.
+    let tmp = TempDir::new().unwrap();
+    let manifest = tmp.path().join("manifest.txt");
+    std::fs::write(&manifest, "").unwrap();
+
+    let assert = Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg("--changed-lines")
+        .arg(&manifest)
+        .arg("--files-from")
+        .arg("-")
+        .write_stdin("")
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("cannot be used with") || stderr.contains("conflict"),
+        "expected clap conflict error in stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn check_changed_lines_empty_manifest_exits_zero_with_no_other_inputs() {
+    // Empty manifest + no other inputs = "no Python files changed";
+    // exit 0 with no output. This is the pre-commit happy path when a
+    // commit touches only non-Python files.
+    Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg("--changed-lines")
+        .arg("-")
+        .write_stdin("")
+        .assert()
+        .success();
+}
+
+#[test]
+fn check_changed_lines_whole_file_entry_keeps_all_findings() {
+    // A bare path in the manifest (no `:start-end`) means whole-file:
+    // no range filter for that path. Every ZR001 hit in the file
+    // survives.
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("test_wholefile.py");
+    std::fs::write(
+        &file,
+        "def test_one():\n    if True:\n        assert True\n\
+         def test_two():\n    if True:\n        assert True\n",
+    )
+    .unwrap();
+
+    let manifest = tmp.path().join("manifest.txt");
+    std::fs::write(&manifest, format!("{}\n", file.display())).unwrap();
+
+    Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg("--changed-lines")
+        .arg(&manifest)
+        .arg(&file)
+        .assert()
+        .code(1)
+        .stdout(contains("2 findings in 1 files discovered."));
+}
+
+#[test]
+fn check_changed_lines_handles_dot_prefix_path_canonicalization() {
+    // Sharp edge from context.md §"Sharp edges": discovery may emit
+    // `./tests/foo.py` while the manifest carries the bare
+    // `tests/foo.py`. Both must match so the finding surfaces.
+    //
+    // Reproduce by running the CLI with `cwd = tmp`, the positional
+    // path `.`, and a manifest entry `test.py:1-3` (no `./` prefix).
+    // The finding's file comes back as `./test.py` and must still
+    // match the manifest.
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("test_canon.py");
+    std::fs::write(&file, "def test_x():\n    if True:\n        assert True\n").unwrap();
+
+    let manifest = tmp.path().join("manifest.txt");
+    std::fs::write(&manifest, "test_canon.py:1-3\n").unwrap();
+
+    Command::cargo_bin("zorilla")
+        .unwrap()
+        .current_dir(tmp.path())
+        .arg("check")
+        .arg("--changed-lines")
+        .arg("manifest.txt")
+        .arg(".")
+        .assert()
+        .code(1)
+        .stdout(contains("ZR001"));
+}
+
+#[test]
 fn check_on_tree_with_conditional_test_emits_zr001_finding() {
     let tmp = TempDir::new().unwrap();
     let tests = tmp.path().join("tests");

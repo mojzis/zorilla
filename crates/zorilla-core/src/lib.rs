@@ -6,6 +6,7 @@
 //! grouped [`Report`].
 
 pub mod ast;
+pub mod changed_lines;
 pub mod config;
 pub mod discovery;
 pub mod overview;
@@ -19,6 +20,7 @@ use std::path::Path;
 
 use rayon::prelude::*;
 
+pub use changed_lines::{ChangedLines, ManifestError};
 pub use config::{Config, RuleConfig};
 pub use discovery::{discover, DiscoveryError};
 pub use overview::{
@@ -52,6 +54,25 @@ pub enum LintError {
 /// Files that fail to read or parse are silently skipped in Phase 2 —
 /// PLAN.md Step 5 introduces diagnostics for these cases.
 pub fn lint<P: AsRef<Path>>(paths: &[P], config: &Config) -> Result<Report, LintError> {
+    lint_with_filter(paths, config, None)
+}
+
+/// Run the linter with an optional changed-lines filter applied to the
+/// produced findings.
+///
+/// When `changed` is `Some`, every finding is checked with
+/// [`ChangedLines::keeps`]; only those whose file is untracked OR whose
+/// line falls inside one of the tracked ranges survive. When `changed`
+/// is `None`, this is equivalent to [`lint`].
+///
+/// The filter runs immediately after the canonical sort so callers
+/// observe a deterministic, fully-filtered finding list regardless of
+/// the rendering format.
+pub fn lint_with_filter<P: AsRef<Path>>(
+    paths: &[P],
+    config: &Config,
+    changed: Option<&ChangedLines>,
+) -> Result<Report, LintError> {
     let files = discover(paths, config)?;
     let files_discovered = files.len();
 
@@ -67,6 +88,10 @@ pub fn lint<P: AsRef<Path>>(paths: &[P], config: &Config) -> Result<Report, Lint
     findings.sort_by(|a, b| {
         a.file.cmp(&b.file).then(a.line.cmp(&b.line)).then(a.column.cmp(&b.column))
     });
+
+    if let Some(cl) = changed {
+        findings.retain(|f| cl.keeps(&f.file, f.line));
+    }
 
     // Sort the discovered files by path so the `overview` subcommand's
     // clean-file enumeration is deterministic across platforms.
@@ -188,6 +213,71 @@ mod tests {
         assert_eq!(rule_name_for("ZR007"), "empty-test");
         assert_eq!(rule_name_for("ZR008"), "context-patch-stack");
         assert_eq!(rule_name_for("ZRwhatever"), "unknown");
+    }
+
+    #[test]
+    fn lint_with_filter_drops_out_of_range_findings() {
+        // Two test functions in the same file, each with a conditional —
+        // ZR001 fires on the offending statement inside each (lines 2
+        // and 5 below). A manifest covering only lines 1-3 must drop the
+        // line-5 finding and keep the line-2 one.
+        let tmp = TempDir::new().unwrap();
+        let tests = tmp.path().join("tests");
+        std::fs::create_dir_all(&tests).unwrap();
+        let file = tests.join("test_a.py");
+        std::fs::write(
+            &file,
+            "def test_one():\n    if True:\n        assert True\n\
+             def test_two():\n    if True:\n        assert True\n",
+        )
+        .unwrap();
+
+        let config = Config::default();
+
+        // Baseline — no filter, both findings.
+        let baseline = lint(&[tmp.path()], &config).unwrap();
+        assert_eq!(baseline.findings.len(), 2);
+        let baseline_lines: Vec<usize> = baseline.findings.iter().map(|f| f.line).collect();
+        assert_eq!(baseline_lines, vec![2, 5]);
+
+        // Filter — manifest covers lines 1-3 of `test_a.py`. The line-2
+        // finding survives; the line-5 one is dropped. The manifest
+        // entry uses the absolute path so it matches the discovery
+        // walker's emitted finding path verbatim.
+        let abs_manifest = format!("{}:1-3\n", file.display());
+        let cl = ChangedLines::from_reader(std::io::Cursor::new(abs_manifest.as_bytes())).unwrap();
+        let filtered = lint_with_filter(&[tmp.path()], &config, Some(&cl)).unwrap();
+        assert_eq!(filtered.findings.len(), 1);
+        assert_eq!(filtered.findings[0].line, 2);
+        // `files_discovered` is the discovery count, not the post-filter
+        // count — both runs walked the same file.
+        assert_eq!(filtered.files_discovered, baseline.files_discovered);
+    }
+
+    #[test]
+    fn lint_with_filter_none_matches_lint() {
+        // `lint_with_filter(_, _, None)` must be byte-equivalent to
+        // `lint(_, _)` so callers can adopt the filter API without
+        // changing untouched call sites' behavior.
+        let tmp = TempDir::new().unwrap();
+        let tests = tmp.path().join("tests");
+        std::fs::create_dir_all(&tests).unwrap();
+        std::fs::write(
+            tests.join("test_a.py"),
+            "def test_x():\n    if True:\n        assert True\n",
+        )
+        .unwrap();
+
+        let config = Config::default();
+        let plain = lint(&[tmp.path()], &config).unwrap();
+        let with_none = lint_with_filter(&[tmp.path()], &config, None).unwrap();
+        assert_eq!(plain.findings.len(), with_none.findings.len());
+        for (a, b) in plain.findings.iter().zip(with_none.findings.iter()) {
+            assert_eq!(a.code, b.code);
+            assert_eq!(a.file, b.file);
+            assert_eq!(a.line, b.line);
+            assert_eq!(a.column, b.column);
+        }
     }
 
     #[test]

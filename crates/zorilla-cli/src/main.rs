@@ -12,7 +12,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
 use zorilla_core::{
     compute_overview, compute_stats, format_overview_json, format_overview_text, format_stats_json,
-    format_stats_text, lint, rule_name_for, rules, Config,
+    format_stats_text, lint, lint_with_filter, rule_name_for, rules, ChangedLines, Config,
 };
 
 #[derive(Debug, Parser)]
@@ -38,6 +38,11 @@ enum Command {
         /// Additional path to lint. May be repeated.
         #[arg(long = "files", value_name = "PATH")]
         files: Vec<PathBuf>,
+        /// Manifest of changed lines (FILE[:start-end,...] per line). Use "-" for stdin.
+        /// Filters findings to those whose line falls inside one of the ranges
+        /// for that file. Files not in the manifest are kept entirely.
+        #[arg(long, value_name = "FILE", conflicts_with = "files_from")]
+        changed_lines: Option<PathBuf>,
     },
     /// List all available rules.
     ListRules,
@@ -112,8 +117,8 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     match cli.command {
-        Command::Check { paths, format, files_from, files } => {
-            check(paths, format, files_from.as_deref(), files)
+        Command::Check { paths, format, files_from, files, changed_lines } => {
+            check(paths, format, files_from.as_deref(), files, changed_lines.as_deref())
         }
         Command::ListRules => Ok(list_rules()),
         Command::Explain { code } => Ok(explain(&code)),
@@ -131,11 +136,32 @@ fn check(
     format: Format,
     files_from: Option<&Path>,
     files: Vec<PathBuf>,
+    changed_lines: Option<&Path>,
 ) -> anyhow::Result<ExitCode> {
-    let paths = resolve_inputs(paths, files, files_from)?;
+    let changed = match changed_lines {
+        Some(src) => Some(ChangedLines::from_path(src).context("parsing --changed-lines")?),
+        None => None,
+    };
+
+    // Empty-manifest short-circuit: if the manifest is present and
+    // empty AND the user provided no other inputs (positional paths,
+    // `--files`, or `--files-from` — the last being mutually exclusive
+    // with `--changed-lines` so it's always None here, but we check it
+    // anyway to keep the rule explicit), exit 0 with no work. This is
+    // the "pre-commit ran but no Python lines changed" path.
+    if let Some(cl) = changed.as_ref() {
+        if cl.is_empty() && paths.is_empty() && files.is_empty() && files_from.is_none() {
+            return Ok(ExitCode::SUCCESS);
+        }
+    }
+
+    let manifest_paths: Vec<PathBuf> =
+        changed.as_ref().map(|cl| cl.paths().map(Path::to_path_buf).collect()).unwrap_or_default();
+
+    let paths = resolve_inputs(paths, files, files_from, manifest_paths)?;
     let config = load_config_for(&paths)?;
 
-    let report = lint(&paths, &config).context("running lint")?;
+    let report = lint_with_filter(&paths, &config, changed.as_ref()).context("running lint")?;
     // Use the first user-supplied path as the base for display paths —
     // matches `path_arg.join(relative_from_walker)` shape from context.md
     // gotchas.
@@ -163,7 +189,7 @@ fn stats(
     files_from: Option<&Path>,
     files: Vec<PathBuf>,
 ) -> anyhow::Result<ExitCode> {
-    let paths = resolve_inputs(paths, files, files_from)?;
+    let paths = resolve_inputs(paths, files, files_from, Vec::new())?;
     let config = load_config_for(&paths)?;
 
     let report = lint(&paths, &config).context("running lint")?;
@@ -188,7 +214,7 @@ fn overview(
     files_from: Option<&Path>,
     files: Vec<PathBuf>,
 ) -> anyhow::Result<ExitCode> {
-    let paths = resolve_inputs(paths, files, files_from)?;
+    let paths = resolve_inputs(paths, files, files_from, Vec::new())?;
     let config = load_config_for(&paths)?;
 
     let report = lint(&paths, &config).context("running lint")?;
@@ -214,14 +240,20 @@ fn should_use_color() -> bool {
     std::io::stdout().is_terminal()
 }
 
-/// Merge positional paths, `--files` repeats, and `--files-from` lines
-/// into a single input list. If every source is empty, default to the
-/// current working directory — matches the existing bare
-/// `zorilla check` behaviour.
+/// Merge positional paths, `--files` repeats, `--files-from` lines, and
+/// paths extracted from a `--changed-lines` manifest into a single input
+/// list. If every source is empty, default to the current working
+/// directory — matches the existing bare `zorilla check` behaviour.
+///
+/// `manifest_paths` is the 4th input source: paths a manifest mentioned
+/// explicitly. Manifest paths are added as `--files`-equivalents so the
+/// discovery walker treats them as explicit file arguments (bypassing
+/// `include` globs the same way `--files` does).
 fn resolve_inputs(
     paths: Vec<PathBuf>,
     files: Vec<PathBuf>,
     files_from: Option<&Path>,
+    manifest_paths: Vec<PathBuf>,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let mut merged: Vec<PathBuf> = Vec::new();
     merged.extend(paths);
@@ -229,6 +261,7 @@ fn resolve_inputs(
     if let Some(src) = files_from {
         merged.extend(read_files_from(src)?);
     }
+    merged.extend(manifest_paths);
 
     if merged.is_empty() {
         Ok(vec![std::env::current_dir().context("getting current directory")?])
