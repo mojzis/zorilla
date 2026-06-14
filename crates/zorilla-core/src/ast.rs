@@ -1136,12 +1136,30 @@ def test_foo():
     }
 
     #[test]
-    fn runtime_skip_self_skipif_returns_false() {
-        // `skipif` is conditional and must NOT match.
+    fn runtime_skip_self_skiptest_prefix_returns_false() {
+        // `self.skipTest_someother` has `skipTest` as a prefix of its
+        // attribute name, not as an exact match — must NOT be accepted.
+        // This guards the exact-match requirement in `call_is_runtime_skip`.
         let src = "\
 class TestX:
     def test_foo(self):
         self.skipTest_someother(\"reason\")
+";
+        let tree = parse(src).unwrap();
+        let test_fn = find_fn(&tree, src, "test_foo");
+        assert!(!test_has_runtime_skip_call(test_fn, src));
+    }
+
+    #[test]
+    fn runtime_skip_self_skipif_returns_false() {
+        // `self.skipif(...)` is a conditional skip decorator helper and
+        // must NOT match — the rule doc and helper comment at ast.rs:595
+        // explicitly exclude `self.skipif`. Only `skipTest` and `skip`
+        // (on `self`) are accepted.
+        let src = "\
+class TestX:
+    def test_foo(self):
+        self.skipif(\"reason\")
 ";
         let tree = parse(src).unwrap();
         let test_fn = find_fn(&tree, src, "test_foo");
