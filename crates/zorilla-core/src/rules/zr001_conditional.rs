@@ -40,6 +40,12 @@
 //! - **Control flow inside a nested `def` or `lambda` within the test** —
 //!   the outer test's control flow is the only concern. A helper
 //!   defined inline can have whatever structure it needs.
+//! - **Runtime skip call as the first real body statement** — a test
+//!   whose very first (non-docstring, non-comment) statement is a call
+//!   to `self.skipTest(...)`, `self.skip(...)`, or `pytest.skip(...)`
+//!   is unconditionally skipped at runtime and is treated identically
+//!   to a `@pytest.mark.skip`-decorated test: its body is not executed,
+//!   so structural smells are irrelevant.
 //!
 //! ## Examples
 //!
@@ -108,6 +114,14 @@ impl Rule for ConditionalRule {
             // Mirrors ZR007's skip-decorator gate. `skipif` is conditional
             // and intentionally not matched.
             if ast::test_has_skip_or_xfail_decorator(test_fn, ctx.source) {
+                continue;
+            }
+            // Skip tests whose first real body statement is a runtime skip
+            // call — `self.skipTest(...)`, `self.skip(...)`, or
+            // `pytest.skip(...)`. Unconditional runtime skips are equivalent
+            // to decorator-based skips: the body never executes and its
+            // structural smells are irrelevant.
+            if ast::test_has_runtime_skip_call(test_fn, ctx.source) {
                 continue;
             }
             // Pre-compute whether the enclosing test function body contains
@@ -1161,5 +1175,36 @@ def test_empty_loop():
         let out = run(src);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].line, 2);
+    }
+
+    #[test]
+    fn does_not_fire_on_runtime_skip_call_as_first_statement() {
+        // A test whose first statement is `self.skipTest(...)` is
+        // unconditionally skipped at runtime — its structural smells are
+        // irrelevant, just like a `@pytest.mark.skip`-decorated test.
+        // This covers the cteni unittest pattern (~28 FP findings).
+        let src = "\
+class TestThing:
+    def test_conditional_but_skipped(self):
+        self.skipTest(\"not ready\")
+        if self.condition:
+            assert self.value == 1
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_when_runtime_skip_is_not_first_statement() {
+        // A skip call that is NOT the first real statement does not
+        // suppress ZR001 — the test body may still execute before it.
+        let src = "\
+def test_has_if_then_skip():
+    if True:
+        pytest.skip(\"reason\")
+    assert True
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].code, "ZR001");
     }
 }

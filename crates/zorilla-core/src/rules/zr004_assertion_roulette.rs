@@ -1,5 +1,13 @@
 //! `ZR004 assertion-roulette` — flag tests with too many bare asserts.
 //!
+//! ## Runtime-skip awareness
+//!
+//! A test whose first real body statement (after any leading docstring or
+//! comments) is `self.skipTest(...)`, `self.skip(...)`, or
+//! `pytest.skip(...)` is unconditionally skipped at runtime. Such tests
+//! are treated the same as `@pytest.mark.skip`-decorated tests: their
+//! bare-assert count is academic and ZR004 does not fire on them.
+//!
 //! # Rule
 //!
 //! A test littered with bare `assert x` statements fails obscurely: when
@@ -83,6 +91,13 @@ impl Rule for AssertionRouletteRule {
             // so its assert count is academic — mirrors ZR007's gate.
             // `skipif` is conditional and intentionally not matched.
             if ast::test_has_skip_or_xfail_decorator(test_fn, ctx.source) {
+                continue;
+            }
+            // Skip tests whose first real body statement is a runtime skip
+            // call — `self.skipTest(...)`, `self.skip(...)`, or
+            // `pytest.skip(...)`. The body never executes, so the
+            // bare-assert count is academic.
+            if ast::test_has_runtime_skip_call(test_fn, ctx.source) {
                 continue;
             }
             let (count, first) = count_bare_asserts_with_first(body, ctx.source);
@@ -330,5 +345,40 @@ def test_ok():
     assert True
 ";
         assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_runtime_skip_call_as_first_statement() {
+        // A test whose first statement is `self.skipTest(...)` is
+        // unconditionally skipped — its bare-assert count is academic.
+        // Mirrors the decorator-based skip gate.
+        let src = "\
+class TestThing:
+    def test_skipped_many_asserts(self):
+        self.skipTest(\"not ready\")
+        assert 1 == 1
+        assert 2 == 2
+        assert 3 == 3
+        assert 4 == 4
+        assert 5 == 5
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_when_runtime_skip_is_not_first_statement() {
+        // The skip call is after real asserts; the test still fires.
+        let src = "\
+def test_asserts_then_skip():
+    assert 1 == 1
+    assert 2 == 2
+    assert 3 == 3
+    assert 4 == 4
+    assert 5 == 5
+    pytest.skip(\"reason\")
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].code, "ZR004");
     }
 }

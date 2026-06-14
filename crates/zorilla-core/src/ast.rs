@@ -17,6 +17,14 @@
 //! assertion helpers, and `with pytest.raises/warns(...)` context
 //! managers). ZR003 and ZR004 share this walk to avoid duplicated descent
 //! logic.
+//!
+//! [`test_has_runtime_skip_call`] complements the decorator-based
+//! [`test_has_skip_or_xfail_decorator`] gate: it recognises tests whose
+//! **first real body statement** is a runtime skip call —
+//! `self.skipTest(...)`, `self.skip(...)`, or `pytest.skip(...)` — and
+//! allows the four skip-aware rules (ZR001, ZR003, ZR004, ZR007) to
+//! suppress findings on those tests just as they do for decorator-skipped
+//! tests.
 
 use std::ops::ControlFlow;
 
@@ -566,6 +574,103 @@ pub fn climb_past_parens(node: Node<'_>) -> Node<'_> {
     current
 }
 
+/// Does the test function's **first real body statement** call one of the
+/// runtime-skip idioms — `self.skipTest(...)`, `self.skip(...)`, or
+/// `pytest.skip(...)`?
+///
+/// A test whose very first action is an unconditional runtime skip is
+/// effectively always-skipped — exactly like a decorator-based
+/// `@pytest.mark.skip`. This helper lets ZR001, ZR003, ZR004, and ZR007
+/// suppress findings on those tests, reducing false positives from
+/// `unittest`-style suites that write `self.skipTest("reason")` as the
+/// first body line.
+///
+/// **Matching rules**
+///
+/// - The call's `function` must be an `attribute` node with:
+///     - `object` = identifier `self` or `pytest`
+///     - `attribute` = identifier `skipTest` or `skip`
+///
+///   Only the exact pairs (`self.skipTest`, `self.skip`, `pytest.skip`)
+///   are accepted. `self.skipif`, bare `skip(...)`, and any other receiver
+///   are deliberately excluded.
+/// - "First real statement" skips a leading docstring
+///   (`expression_statement` wrapping a `string`) and any leading
+///   `comment` named children.
+/// - Only the first real statement is inspected. A skip call as the
+///   *second* or later statement does **not** trigger this helper.
+#[must_use]
+pub fn test_has_runtime_skip_call(test_fn: Node<'_>, source: &str) -> bool {
+    let Some(body) = test_fn.child_by_field_name("body") else {
+        return false;
+    };
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        let kind = child.kind();
+        // Skip leading comments (tree-sitter exposes `# ...` as named
+        // `comment` children of the block).
+        if kind == "comment" {
+            continue;
+        }
+        // Skip a leading docstring: `expression_statement` whose single
+        // named child is a `string`.
+        if kind == "expression_statement" {
+            if let Some(inner) = child.named_child(0) {
+                if inner.kind() == "string" && child.named_child_count() == 1 {
+                    continue;
+                }
+            }
+        }
+        // This is the first real statement. Check whether it is an
+        // `expression_statement` wrapping a skip call.
+        if kind != "expression_statement" {
+            return false;
+        }
+        let Some(inner) = child.named_child(0) else {
+            return false;
+        };
+        if inner.kind() != "call" {
+            return false;
+        }
+        return call_is_runtime_skip(inner, source);
+    }
+    false
+}
+
+/// Is `call_node` a call to one of the accepted runtime-skip targets:
+/// `self.skipTest(...)`, `self.skip(...)`, or `pytest.skip(...)`?
+///
+/// Inspects the `function` field of the `call` node directly. It must be
+/// an `attribute` node with an `object` identifier equal to `self` or
+/// `pytest` and an `attribute` identifier equal to `skipTest` or `skip`.
+/// The pairing is further constrained: `pytest.skipTest` is NOT accepted
+/// (not a real pytest API) and `self.skip` is only accepted when the
+/// object is `self`.
+fn call_is_runtime_skip(call_node: Node<'_>, source: &str) -> bool {
+    let Some(func) = call_node.child_by_field_name("function") else {
+        return false;
+    };
+    if func.kind() != "attribute" {
+        return false;
+    }
+    let Some(object) = func.child_by_field_name("object") else {
+        return false;
+    };
+    if object.kind() != "identifier" {
+        return false;
+    }
+    let Ok(obj_name) = object.utf8_text(source.as_bytes()) else {
+        return false;
+    };
+    let Some(attr) = func.child_by_field_name("attribute") else {
+        return false;
+    };
+    let Ok(attr_name) = attr.utf8_text(source.as_bytes()) else {
+        return false;
+    };
+    matches!((obj_name, attr_name), ("self", "skipTest" | "skip") | ("pytest", "skip"))
+}
+
 /// Does `with_node` carry a `with_item` whose value is a call whose
 /// function's final name is `raises` or `warns`?
 fn with_statement_is_raises_or_warns(with_node: Node<'_>, source: &str) -> bool {
@@ -948,5 +1053,121 @@ class Other:
             .map(|n| function_name(n, src).unwrap().to_string())
             .collect();
         assert_eq!(names, vec!["test_a", "test_b", "test_c"]);
+    }
+
+    // --- test_has_runtime_skip_call tests ---
+
+    #[test]
+    fn runtime_skip_self_skip_test_as_first_statement_returns_true() {
+        let src = "\
+class TestX:
+    def test_foo(self):
+        self.skipTest(\"not ready\")
+        assert True
+";
+        let tree = parse(src).unwrap();
+        let test_fn = find_fn(&tree, src, "test_foo");
+        assert!(test_has_runtime_skip_call(test_fn, src));
+    }
+
+    #[test]
+    fn runtime_skip_self_skip_as_first_statement_returns_true() {
+        let src = "\
+class TestX:
+    def test_foo(self):
+        self.skip(\"reason\")
+";
+        let tree = parse(src).unwrap();
+        let test_fn = find_fn(&tree, src, "test_foo");
+        assert!(test_has_runtime_skip_call(test_fn, src));
+    }
+
+    #[test]
+    fn runtime_skip_pytest_skip_as_first_statement_returns_true() {
+        let src = "\
+def test_foo():
+    pytest.skip(\"reason\")
+    assert True
+";
+        let tree = parse(src).unwrap();
+        let test_fn = find_fn(&tree, src, "test_foo");
+        assert!(test_has_runtime_skip_call(test_fn, src));
+    }
+
+    #[test]
+    fn runtime_skip_after_docstring_returns_true() {
+        // A leading docstring is transparent — the skip call right after
+        // is still the "first real statement".
+        let src = "\
+def test_foo():
+    \"\"\"This test is skipped.\"\"\"
+    pytest.skip(\"reason\")
+    assert True
+";
+        let tree = parse(src).unwrap();
+        let test_fn = find_fn(&tree, src, "test_foo");
+        assert!(test_has_runtime_skip_call(test_fn, src));
+    }
+
+    #[test]
+    fn runtime_skip_as_second_statement_returns_false() {
+        // A skip that is NOT first does not suppress the test.
+        let src = "\
+def test_foo():
+    setup()
+    pytest.skip(\"reason\")
+";
+        let tree = parse(src).unwrap();
+        let test_fn = find_fn(&tree, src, "test_foo");
+        assert!(!test_has_runtime_skip_call(test_fn, src));
+    }
+
+    #[test]
+    fn runtime_skip_bare_skip_call_returns_false() {
+        // `skip(...)` without a receiver is NOT accepted — the brief
+        // explicitly requires a two-segment attribute.
+        let src = "\
+def test_foo():
+    skip(\"reason\")
+";
+        let tree = parse(src).unwrap();
+        let test_fn = find_fn(&tree, src, "test_foo");
+        assert!(!test_has_runtime_skip_call(test_fn, src));
+    }
+
+    #[test]
+    fn runtime_skip_self_skipif_returns_false() {
+        // `skipif` is conditional and must NOT match.
+        let src = "\
+class TestX:
+    def test_foo(self):
+        self.skipTest_someother(\"reason\")
+";
+        let tree = parse(src).unwrap();
+        let test_fn = find_fn(&tree, src, "test_foo");
+        assert!(!test_has_runtime_skip_call(test_fn, src));
+    }
+
+    #[test]
+    fn runtime_skip_plain_test_returns_false() {
+        let src = "\
+def test_foo():
+    assert 1 == 1
+";
+        let tree = parse(src).unwrap();
+        let test_fn = find_fn(&tree, src, "test_foo");
+        assert!(!test_has_runtime_skip_call(test_fn, src));
+    }
+
+    #[test]
+    fn runtime_skip_other_receiver_returns_false() {
+        // `something_else.skip(...)` — not `self` or `pytest`.
+        let src = "\
+def test_foo():
+    manager.skip(\"reason\")
+";
+        let tree = parse(src).unwrap();
+        let test_fn = find_fn(&tree, src, "test_foo");
+        assert!(!test_has_runtime_skip_call(test_fn, src));
     }
 }

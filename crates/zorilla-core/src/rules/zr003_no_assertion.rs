@@ -32,6 +32,14 @@
 //! start of `function_definition`). The intent is "this whole test is
 //! assertion-free"; pointing anywhere inside is misleading.
 //!
+//! ## Runtime-skip awareness
+//!
+//! A test whose first real body statement (after any leading docstring
+//! or comments) is `self.skipTest(...)`, `self.skip(...)`, or
+//! `pytest.skip(...)` is unconditionally skipped at runtime. Such tests
+//! are treated the same as `@pytest.mark.skip`-decorated tests and do
+//! not fire ZR003, even though they contain no assertion.
+//!
 //! ## Examples
 //!
 //! Positive — no assertion at all:
@@ -98,6 +106,13 @@ impl Rule for NoAssertionRule {
             // this gate. Mirrors ZR007's pattern; `skipif` is conditional
             // and intentionally not matched.
             if ast::test_has_skip_or_xfail_decorator(test_fn, ctx.source) {
+                continue;
+            }
+            // Skip tests whose first real body statement is a runtime skip
+            // call — `self.skipTest(...)`, `self.skip(...)`, or
+            // `pytest.skip(...)`. Such tests never run their body, so the
+            // absence of assertions is by design.
+            if ast::test_has_runtime_skip_call(test_fn, ctx.source) {
                 continue;
             }
             if !has_any_assert(body, ctx.source, helpers) {
@@ -395,5 +410,33 @@ def test_c():
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].line, 1);
         assert_eq!(out[1].line, 7);
+    }
+
+    #[test]
+    fn does_not_fire_on_runtime_skip_call_as_first_statement() {
+        // A test that immediately calls `self.skipTest(...)` is
+        // unconditionally skipped — not asserting is by design.
+        // This is the cteni unittest pattern (~28 FP findings).
+        let src = "\
+class TestThing:
+    def test_skipped_no_assert(self):
+        self.skipTest(\"not ready\")
+        do_something()
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_when_runtime_skip_is_not_first_statement() {
+        // A skip call after real code does not suppress ZR003 —
+        // the test may be reached on non-skipped paths.
+        let src = "\
+def test_no_assert_skip_not_first():
+    do_something()
+    pytest.skip(\"reason\")
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].code, "ZR003");
     }
 }

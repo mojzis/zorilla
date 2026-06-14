@@ -19,6 +19,15 @@
 //! Any non-placeholder statement — an assignment, call, assert, raise,
 //! return, control-flow construct, etc. — disqualifies the test.
 //!
+//! ## Runtime-skip awareness
+//!
+//! In addition to `@pytest.mark.skip` / `@pytest.mark.xfail` decorators,
+//! this rule also skips tests whose first real body statement (after any
+//! leading docstring or comments) is a call to `self.skipTest(...)`,
+//! `self.skip(...)`, or `pytest.skip(...)`. Such a body is not "empty"
+//! in the harmful sense — the test is unconditionally skipped at runtime
+//! and its placeholder-shaped body is intentional.
+//!
 //! ## Examples
 //!
 //! Positive — `pass`-only body:
@@ -76,6 +85,13 @@ impl Rule for EmptyTestRule {
                 continue;
             };
             if ast::test_has_skip_or_xfail_decorator(test_fn, ctx.source) {
+                continue;
+            }
+            // Skip tests whose first real body statement is a runtime skip
+            // call — `self.skipTest(...)`, `self.skip(...)`, or
+            // `pytest.skip(...)`. A body with only a runtime skip call as its
+            // first statement is intentionally placeholder-shaped.
+            if ast::test_has_runtime_skip_call(test_fn, ctx.source) {
                 continue;
             }
             if body_is_empty(body) {
@@ -458,5 +474,37 @@ def test_commented_out():
         // pass is still there, so the rule fires.
         let out = run(src);
         assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn does_not_fire_on_runtime_skip_call_as_first_statement() {
+        // A test that starts with `pytest.skip(...)` is unconditionally
+        // skipped at runtime — even if the rest of the body is a `pass`,
+        // the body is not "empty" in the harmful sense. Mirrors the
+        // decorator gate.
+        //
+        // NOTE: `pytest.skip(...)` is a real call statement, so
+        // `body_is_empty` would return `false` anyway (it's not a
+        // placeholder). The gate here ensures parity with the decorator
+        // path and guards against future refactors.
+        let src = "\
+def test_runtime_skip_pass():
+    pytest.skip(\"reason\")
+    pass
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn still_fires_on_pass_only_body_without_runtime_skip() {
+        // Guard: a plain `pass`-only body (no skip call) still fires.
+        // The runtime-skip gate must not affect unrelated empty tests.
+        let src = "\
+def test_pass_only():
+    pass
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].code, "ZR007");
     }
 }
