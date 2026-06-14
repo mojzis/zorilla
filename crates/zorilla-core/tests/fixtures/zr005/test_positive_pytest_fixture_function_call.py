@@ -12,6 +12,8 @@ def test_inline_url_kwarg_carved_out():
     # so carve-out 1c silences it. The prior version of this fixture expected
     # ZR005 to fire here; carve-out 1c intentionally changes that behavior.
     # See test_positive_kwarg_url_still_fires.py for a case that still fires
-    # (url in a non-listed kwarg position).
+    # (string value in a dict whose key "x" is not in URL_KWARG_NAMES,
+    # passed as a `headers` arg — neither the kwarg name nor the dict key
+    # is in the carve-out set, so ZR005 fires).
     repo = build_repo(url="https://github.com/owner/repo")
     assert repo
