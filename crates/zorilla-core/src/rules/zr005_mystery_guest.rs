@@ -29,6 +29,31 @@
 //! at the literal itself is the most useful signal — the reader sees
 //! exactly which argument is the mystery guest.
 //!
+//! ## Carve-outs
+//!
+//! Beyond the allow-list, several structural carve-outs silence specific
+//! patterns that recur in real test suites:
+//!
+//! - **Assert message** (`assert cond, "msg"`) — the failure explanation
+//!   string is not a request target.
+//! - **`TestClient` route** (`client.get("/path")`) — the first positional
+//!   argument to an HTTP-verb method on a known test-client receiver is a
+//!   fixture-like route reference, not a mystery guest.
+//! - **Mock RHS** (`mock.return_value = "..."`, `mock.side_effect = "..."`)
+//!   — mock setup data.
+//! - **Response header membership** (`assert "/x" in resp.headers["h"]`)
+//!   — a substring expectation, not a request target.
+//! - **Pytest fixture body** — strings inside a `@pytest.fixture` function
+//!   are fixture data.
+//! - **URL kwarg value** (1c) — when the literal is the *value* of a
+//!   keyword argument whose *name* is in [`URL_KWARG_NAMES`] (e.g.
+//!   `build_repo(url="https://github.com/o/r")`), it is treated as a
+//!   reference identity, not a mystery guest.
+//! - **Dict pair value with URL key** (1d) — when the literal is the
+//!   *value* of a dict entry whose *key* is a string literal in
+//!   [`URL_KWARG_NAMES`] (e.g. `{"url": "https://github.com/o/r"}`), it
+//!   is treated similarly. A non-string key does NOT trigger this carve-out.
+//!
 //! ## Examples
 //!
 //! Positive — an absolute path inside a test:
@@ -60,6 +85,22 @@
 //! ```python
 //! def test_path_exists():
 //!     assert exists(p), "/etc/hosts should always be present"
+//! ```
+//!
+//! Negative — URL passed as a named `url=` kwarg (carve-out 1c):
+//!
+//! ```python
+//! def test_build():
+//!     repo = build_repo(url="https://github.com/owner/repo")  # not flagged
+//!     assert repo
+//! ```
+//!
+//! Negative — URL as value of a `"url"` key in a dict (carve-out 1d):
+//!
+//! ```python
+//! def test_cfg():
+//!     cfg = {"url": "https://github.com/owner/repo"}  # not flagged
+//!     assert cfg
 //! ```
 
 use std::ops::ControlFlow;
@@ -97,6 +138,22 @@ const RECEIVER_NAMES: &[&str] =
 const HTTP_METHODS: &[&str] =
     &["get", "post", "put", "delete", "patch", "options", "head", "request"];
 
+/// Keyword-argument / dict-key names that indicate the literal is a
+/// reference identity (URL or path) declared as fixture configuration
+/// rather than a mystery-guest external resource accessed by the test.
+///
+/// Used by two carve-outs:
+///
+/// - **1c** (`is_in_url_kwarg`): the string is the *value* of a `keyword_argument`
+///   whose `name` field is in this list — e.g. `build_repo(url="https://…")`.
+/// - **1d** (`is_in_url_dict_pair`): the string is the *value* of a `pair`
+///   (dict entry) whose *key* is a string literal in this list —
+///   e.g. `{"url": "https://…"}`.
+///
+/// The set is intentionally small and hardcoded (Part 2 of entry #39 adds
+/// a config key for extensibility — that is out of scope here).
+const URL_KWARG_NAMES: &[&str] = &["url", "endpoint", "href", "link", "path", "id", "name"];
+
 /// The registered ZR005 rule instance.
 pub static ZR005_MYSTERY_GUEST: MysteryGuestRule = MysteryGuestRule;
 
@@ -129,6 +186,8 @@ impl Rule for MysteryGuestRule {
                     && !is_in_mock_attribute_assignment_rhs(node, ctx.source)
                     && !is_in_response_headers_membership_check(node, ctx.source)
                     && !is_in_pytest_fixture_function(node, ctx.source)
+                    && !is_in_url_kwarg(node, ctx.source)
+                    && !is_in_url_dict_pair(node, ctx.source)
                 {
                     if let Some(literal) = string_content(node, ctx.source) {
                         if is_mystery_guest(literal)
@@ -578,6 +637,89 @@ fn function_has_pytest_fixture_decorator(fn_node: Node<'_>, source: &str) -> boo
         }
     }
     false
+}
+
+/// Is `string_node` the **value** of a `keyword_argument` whose **name**
+/// is in [`URL_KWARG_NAMES`]?
+///
+/// Recognises the pattern `SomeClass(url="https://…")` — the literal is
+/// a reference identity passed as a named URL/path argument, not an
+/// external resource the test is accessing. Walks past any surrounding
+/// `parenthesized_expression` wrappers before checking the parent node.
+///
+/// Example shapes that are carved out (1c):
+/// ```python
+/// repo = build_repo(url="https://github.com/o/r")
+/// obj  = MyClass(endpoint="https://api.example.com/")
+/// ```
+fn is_in_url_kwarg(string_node: Node<'_>, source: &str) -> bool {
+    let current = climb_past_parens(string_node);
+    let Some(parent) = current.parent() else {
+        return false;
+    };
+    if parent.kind() != "keyword_argument" {
+        return false;
+    }
+    // The string must be the `value` field, not the `name` field.
+    let Some(value) = parent.child_by_field_name("value") else {
+        return false;
+    };
+    if value.id() != current.id() {
+        return false;
+    }
+    // The `name` field must be an identifier in URL_KWARG_NAMES.
+    let Some(name_node) = parent.child_by_field_name("name") else {
+        return false;
+    };
+    let Ok(name) = name_node.utf8_text(source.as_bytes()) else {
+        return false;
+    };
+    URL_KWARG_NAMES.contains(&name)
+}
+
+/// Is `string_node` the **value** of a dict `pair` whose **key** is a
+/// string literal in [`URL_KWARG_NAMES`]?
+///
+/// Recognises the pattern `{"url": "https://…"}` — the literal is the
+/// URL/path value of a named config dict entry, not an external resource
+/// the test is directly accessing. Walks past any surrounding
+/// `parenthesized_expression` wrappers before checking the parent node.
+///
+/// The key MUST be a string literal — a non-string key (e.g. a variable
+/// `KEY`) does NOT trigger this carve-out.
+///
+/// Example shapes that are carved out (1d):
+/// ```python
+/// cfg = {"url": "https://github.com/o/r"}
+/// params = {"endpoint": "https://api.example.com/"}
+/// ```
+fn is_in_url_dict_pair(string_node: Node<'_>, source: &str) -> bool {
+    let current = climb_past_parens(string_node);
+    let Some(parent) = current.parent() else {
+        return false;
+    };
+    if parent.kind() != "pair" {
+        return false;
+    }
+    // The string must be the `value` field, not the `key` field.
+    let Some(value) = parent.child_by_field_name("value") else {
+        return false;
+    };
+    if value.id() != current.id() {
+        return false;
+    }
+    // The `key` field must itself be a string literal in URL_KWARG_NAMES.
+    let Some(key) = parent.child_by_field_name("key") else {
+        return false;
+    };
+    if key.kind() != "string" {
+        // Non-string key (e.g. an identifier / variable) — carve-out does not apply.
+        return false;
+    }
+    let Some(key_content) = string_content(key, source) else {
+        return false;
+    };
+    URL_KWARG_NAMES.contains(&key_content)
 }
 
 /// Truncate `s` to at most `max` characters, appending `...` when we cut.
@@ -1105,20 +1247,36 @@ def test_data():
         assert!(run(src).is_empty());
     }
 
+    // NOTE: This test was previously named `fires_on_url_in_regular_test_function_not_fixture`
+    // and asserted that `build_repo(url="https://github.com/owner/repo")` FIRES.
+    // That premise is intentionally inverted by carve-out 1c: when the literal is
+    // the value of a keyword argument whose name is in URL_KWARG_NAMES (e.g. `url=`),
+    // it is treated as a reference identity declaration, not a mystery guest.
+    // The test is renamed and its assertion updated accordingly.
     #[test]
-    fn fires_on_url_in_regular_test_function_not_fixture() {
-        // Sanity guard: a URL literal in a normal `test_*` function
-        // (NOT decorated with `@pytest.fixture`) still fires. The
-        // case-4 carve-out is scoped exactly to fixture bodies and
-        // must not leak into regular tests.
+    fn does_not_fire_on_url_kwarg_value() {
+        // 1c carve-out: `url=` is in URL_KWARG_NAMES, so the literal is
+        // a reference identity, not a mystery guest. This is the canonical
+        // GithubProject(url=...) / build_repo(url=...) pattern.
         let src = "\
 def test_uses_url_inline():
     repo = build_repo(url=\"https://github.com/owner/repo\")
     assert repo
 ";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_url_in_non_url_kwarg() {
+        // Guard: a non-listed kwarg name (`data`) does not trigger 1c.
+        let src = "\
+def test_uses_data_kwarg():
+    result = make_thing(data=\"https://leak.example/\")
+    assert result
+";
         let out = run(src);
         assert_eq!(out.len(), 1);
-        assert!(out[0].message.contains("https://github.com/owner/repo"));
+        assert!(out[0].message.contains("https://leak.example/"));
     }
 
     #[test]
@@ -1157,5 +1315,84 @@ def test_mgr():
         let out = run(src);
         assert_eq!(out.len(), 1);
         assert!(out[0].message.contains("/x"));
+    }
+
+    // ── 1c: kwarg-name aware carve-out ──────────────────────────────────────
+
+    #[test]
+    fn does_not_fire_on_url_kwarg_with_https_url() {
+        // 1c positive: `url=` is in URL_KWARG_NAMES; the GitHub URL is a
+        // reference identity, not a mystery guest.
+        let src = "\
+def test_builds_repo():
+    repo = build_repo(url=\"https://github.com/o/r\")
+    assert repo
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_https_url_in_non_listed_kwarg() {
+        // 1c negative: `data` is not in URL_KWARG_NAMES, so the literal fires.
+        let src = "\
+def test_makes_thing():
+    result = make_thing(data=\"https://leak.example/\")
+    assert result
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].message.contains("https://leak.example/"));
+    }
+
+    #[test]
+    fn does_not_fire_on_endpoint_kwarg() {
+        // 1c positive: `endpoint` is in URL_KWARG_NAMES.
+        let src = "\
+def test_endpoint():
+    client = MyClient(endpoint=\"https://github.com/o/r\")
+    assert client
+";
+        assert!(run(src).is_empty());
+    }
+
+    // ── 1d: dict-pair-value aware carve-out ─────────────────────────────────
+
+    #[test]
+    fn does_not_fire_on_url_dict_pair_value() {
+        // 1d positive: `{"url": "..."}` — key is the string `"url"` which
+        // is in URL_KWARG_NAMES; the value URL is not a mystery guest.
+        let src = "\
+def test_cfg():
+    cfg = {\"url\": \"https://github.com/o/r\"}
+    assert cfg
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_https_url_in_non_listed_dict_key() {
+        // 1d negative: `"data"` is not in URL_KWARG_NAMES, so the URL fires.
+        let src = "\
+def test_data_dict():
+    d = {\"data\": \"https://leak.example/\"}
+    assert d
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].message.contains("https://leak.example/"));
+    }
+
+    #[test]
+    fn fires_on_https_url_in_dict_pair_with_non_string_key() {
+        // 1d guard: the key must be a string literal. A non-string key
+        // (an identifier like `KEY`) does NOT trigger the carve-out.
+        let src = "\
+def test_var_key():
+    d = {KEY: \"https://leak.example/\"}
+    assert d
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].message.contains("https://leak.example/"));
     }
 }

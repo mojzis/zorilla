@@ -7,11 +7,11 @@ def sample_url():
     return "https://api.example.com/fixture"
 
 
-def test_inline_url_still_fires():
-    # Outside any fixture function — an inline literal URL inside a
-    # regular `test_*` body must still fire. The case-4 carve-out is
-    # scoped to fixture function bodies only and must not leak into
-    # regular tests. This is the inline-test-body case from the
-    # `projects` corpus that the brief explicitly forbids silencing.
+def test_inline_url_kwarg_carved_out():
+    # Outside any fixture function — but the `url=` kwarg is in URL_KWARG_NAMES,
+    # so carve-out 1c silences it. The prior version of this fixture expected
+    # ZR005 to fire here; carve-out 1c intentionally changes that behavior.
+    # See test_positive_kwarg_url_still_fires.py for a case that still fires
+    # (url in a non-listed kwarg position).
     repo = build_repo(url="https://github.com/owner/repo")
     assert repo
