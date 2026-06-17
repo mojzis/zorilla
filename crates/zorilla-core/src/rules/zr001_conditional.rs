@@ -22,16 +22,19 @@
 //!   branching. Only `try` blocks that contain at least one
 //!   `except_clause` fire.
 //! - **`for` over asserts (with optional intervening assignments,
-//!   comments, and `with` wrappers)** — a parametrize-by-loop pattern
-//!   (`for case in cases: assert case.ok`, `for m in months: s =
-//!   compute(m); assert s == 0`, or `for case in cases: with
-//!   self.subTest(...): self.assertX(...)`) where the loop body has at
-//!   least one assert-bearing statement, plain `assignment` /
+//!   comments, bare non-helper calls, and `with` wrappers)** — a
+//!   parametrize-by-loop pattern (`for case in cases: assert case.ok`,
+//!   `for m in months: s = compute(m); assert s == 0`, or `for case in
+//!   cases: with self.subTest(...): self.assertX(...)`) where the loop
+//!   body has at least one assert-bearing statement, plain `assignment` /
 //!   `augmented_assignment` and inline `# comments` interleaved,
-//!   optionally wrapped in `with` blocks (whose bodies recursively
-//!   satisfy the same shape), and no control flow anywhere inside.
-//!   Helper-call asserts (`self.assertEqual(...)`) count alongside bare
-//!   `assert`s.
+//!   optionally a trailing bare non-helper call statement (e.g.
+//!   `ast.parse(case.content)` — no assignment, no `return`), optionally
+//!   wrapped in `with` blocks (whose bodies recursively satisfy the same
+//!   shape), and no control flow anywhere inside. Helper-call asserts
+//!   (`self.assertEqual(...)`) count alongside bare `assert`s. A loop
+//!   body consisting entirely of bare calls with no real assert still
+//!   fires.
 //! - **`for` of pure side-effect calls inside an assertless test** — a
 //!   mis-named fixture (`def test_env(): ...; for k in KEYS:
 //!   os.environ.pop(k)`) is doing cleanup, not branching. When the
@@ -334,7 +337,12 @@ fn for_body_is_parametrize_substitute(
     for child in &children {
         match classify_for_body_statement(*child, source, helpers) {
             BodyStatement::Assertion => has_assertion = true,
-            BodyStatement::Assignment | BodyStatement::Comment => {}
+            // Assignment, Comment, and NoReturnCall are all transparent:
+            // they don't satisfy the assertion requirement but they also
+            // don't disqualify the loop. The loop still needs at least one
+            // Assertion somewhere (enforced by the `has_assertion` check
+            // at the end).
+            BodyStatement::Assignment | BodyStatement::Comment | BodyStatement::NoReturnCall => {}
             BodyStatement::Other => return false,
         }
     }
@@ -406,6 +414,14 @@ enum BodyStatement {
     /// surrounding loop body still qualifies for the for-of-asserts
     /// downgrade when comments are interleaved with real statements.
     Comment,
+    /// An `expression_statement` wrapping a `call` that is NOT a known
+    /// assertion helper and is NOT a return. Transparent for the
+    /// for-of-asserts shape (does NOT satisfy the assertion requirement,
+    /// does NOT disqualify): a bare side-effect call like `ast.parse(x)`
+    /// after an assert stays exempt. The loop still requires at least one
+    /// `Assertion` somewhere — a body of only `NoReturnCall`s does not
+    /// qualify via the parametrize-substitute path.
+    NoReturnCall,
     /// Anything else — fails the "only asserts/assignments" check.
     Other,
 }
@@ -423,13 +439,16 @@ fn classify_for_body_statement(
             };
             match inner.kind() {
                 "call" => {
-                    let Some(name) = call_final_name(inner, source) else {
-                        return BodyStatement::Other;
-                    };
-                    if helpers.contains(name) {
+                    let name = call_final_name(inner, source);
+                    if name.is_some_and(|n| helpers.contains(n) || is_helper_prefix(n)) {
                         BodyStatement::Assertion
                     } else {
-                        BodyStatement::Other
+                        // A bare non-helper call statement (e.g. `ast.parse(x)`)
+                        // is transparent — it neither satisfies the assertion
+                        // requirement nor disqualifies the loop. `return_statement`
+                        // is a separate node kind (not a `call`) and still falls
+                        // through to `Other` below.
+                        BodyStatement::NoReturnCall
                     }
                 }
                 "assignment" | "augmented_assignment" => BodyStatement::Assignment,
@@ -499,7 +518,13 @@ fn classify_with_statement(
                 has_assertion = true;
                 has_non_comment = true;
             }
-            BodyStatement::Assignment => {
+            // NoReturnCall is transparent like Assignment: it contributes
+            // to `has_non_comment` (it's a real statement, not just a
+            // comment) but does NOT set `has_assertion`. A `with` body
+            // consisting only of bare non-helper calls classifies as
+            // `Assignment` at most — transparent but non-asserting — so
+            // the surrounding loop still needs a real Assertion elsewhere.
+            BodyStatement::Assignment | BodyStatement::NoReturnCall => {
                 has_non_comment = true;
             }
             BodyStatement::Comment => {}
@@ -1206,5 +1231,59 @@ def test_has_if_then_skip():
         let out = run(src);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].code, "ZR001");
+    }
+
+    // ── Phase 3 (1f) tests: trailing no-return call tolerance ────────────
+
+    #[test]
+    fn does_not_fire_on_for_loop_with_assert_then_bare_call() {
+        // biston case: `for case in CASES: assert transform(case);
+        // ast.parse(case.content)`. The trailing bare non-helper call is a
+        // side-effect round-trip check, NOT a return and NOT an assertion
+        // helper. With 1f it must be transparent — the loop still qualifies
+        // as a parametrize-substitute because there is at least one real
+        // assert.
+        let src = "\
+def test_each_case():
+    for case in CASES:
+        assert transform(case)
+        ast.parse(case.content)
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_for_loop_with_assert_then_return() {
+        // A `return` inside the loop body still disqualifies. The entry
+        // explicitly excludes "return" from the new tolerance.
+        let src = "\
+def test_each_case():
+    for case in CASES:
+        assert transform(case)
+        return
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].line, 2);
+    }
+
+    #[test]
+    fn fires_on_for_loop_of_only_bare_call_in_test_with_asserts() {
+        // A loop whose body contains ONLY a bare non-helper call (no assert
+        // in the loop) must NOT become exempt via the parametrize path,
+        // even when the enclosing test HAS an assert outside the loop.
+        // This mirrors the existing
+        // `fires_on_for_loop_calling_unknown_helper_in_test_with_asserts`
+        // shape and confirms 1f did not widen the parametrize path to
+        // assertless loops.
+        let src = "\
+def test_does_real_work():
+    assert setup()
+    for case in CASES:
+        process(case)
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].line, 3);
     }
 }
