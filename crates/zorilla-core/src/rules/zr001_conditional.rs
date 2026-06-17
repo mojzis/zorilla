@@ -28,13 +28,13 @@
 //!   cases: with self.subTest(...): self.assertX(...)`) where the loop
 //!   body has at least one assert-bearing statement, plain `assignment` /
 //!   `augmented_assignment` and inline `# comments` interleaved,
-//!   optionally a trailing bare non-helper call statement (e.g.
-//!   `ast.parse(case.content)` — no assignment, no `return`), optionally
-//!   wrapped in `with` blocks (whose bodies recursively satisfy the same
-//!   shape), and no control flow anywhere inside. Helper-call asserts
-//!   (`self.assertEqual(...)`) count alongside bare `assert`s. A loop
-//!   body consisting entirely of bare calls with no real assert still
-//!   fires.
+//!   optionally one or more bare non-helper call statements in any
+//!   position (e.g. `ast.parse(case.content)` — no assignment, no
+//!   `return`), optionally wrapped in `with` blocks (whose bodies
+//!   recursively satisfy the same shape), and no control flow anywhere
+//!   inside. Helper-call asserts (`self.assertEqual(...)`) count
+//!   alongside bare `assert`s. A loop body consisting entirely of bare
+//!   calls with no real assert still fires.
 //! - **`for` of pure side-effect calls inside an assertless test** — a
 //!   mis-named fixture (`def test_env(): ...; for k in KEYS:
 //!   os.environ.pop(k)`) is doing cleanup, not branching. When the
@@ -418,9 +418,10 @@ enum BodyStatement {
     /// assertion helper and is NOT a return. Transparent for the
     /// for-of-asserts shape (does NOT satisfy the assertion requirement,
     /// does NOT disqualify): a bare side-effect call like `ast.parse(x)`
-    /// after an assert stays exempt. The loop still requires at least one
-    /// `Assertion` somewhere — a body of only `NoReturnCall`s does not
-    /// qualify via the parametrize-substitute path.
+    /// may appear in any position within the loop body and is tolerated.
+    /// The loop still requires at least one `Assertion` somewhere — a
+    /// body of only `NoReturnCall`s does not qualify via the
+    /// parametrize-substitute path.
     NoReturnCall,
     /// Anything else — fails the "only asserts/assignments" check.
     Other,
