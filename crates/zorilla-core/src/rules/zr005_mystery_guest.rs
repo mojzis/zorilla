@@ -39,10 +39,13 @@
 //! - **`TestClient` route** (`client.get("/path")`) — the first positional
 //!   argument to an HTTP-verb method on a known test-client receiver is a
 //!   fixture-like route reference, not a mystery guest.
-//! - **Mock RHS** (`mock.return_value = "..."`, `mock.side_effect = "..."`)
-//!   — mock setup data.
-//! - **Response header membership** (`assert "/x" in resp.headers["h"]`)
-//!   — a substring expectation, not a request target.
+//! - **Attribute-assignment RHS** (`obj.attr = "..."`, or one call deep
+//!   `obj.attr = helper("...")`) — setup data attached to an object
+//!   (often a mock), not a resource the test opens.
+//! - **Membership assert** (`assert "/x" in resp.text`,
+//!   `assert "/x" in resp.headers["h"]`) — the literal is a substring
+//!   needle searched in a runtime value, not a request target. An inline
+//!   collection RHS (`assert "/x" in ["/a", "/b"]`) still fires.
 //! - **Pytest fixture body** — strings inside a `@pytest.fixture` function
 //!   are fixture data.
 //! - **URL kwarg value** (1c) — when the literal is the *value* of a
@@ -183,8 +186,8 @@ impl Rule for MysteryGuestRule {
                 if node.kind() == "string"
                     && !is_assert_message(node)
                     && !is_in_test_client_call(node, ctx.source)
-                    && !is_in_mock_attribute_assignment_rhs(node, ctx.source)
-                    && !is_in_response_headers_membership_check(node, ctx.source)
+                    && !is_in_attribute_assignment_rhs(node)
+                    && !is_in_membership_assert(node)
                     && !is_in_pytest_fixture_function(node, ctx.source)
                     && !is_in_url_kwarg(node, ctx.source)
                     && !is_in_url_dict_pair(node, ctx.source)
@@ -444,73 +447,107 @@ fn is_assert_message(string_node: Node<'_>) -> bool {
     named.get(1).is_some_and(|n| n.id() == current.id())
 }
 
-/// Is `string_node` the **RHS** of an `assignment` whose target is an
-/// `attribute` named `return_value` or `side_effect`?
+/// Is `string_node` assigned (directly, or one call-indirection deep) to an
+/// **object attribute**? That is, the literal sits in the RHS of an
+/// `assignment` whose target (`left`) is an `attribute`.
 ///
-/// Recognises the canonical mock-configuration shape:
+/// Two shapes are recognised:
 ///
-/// ```python
-/// mock_obj.return_value = "/srv/data/file.txt"
-/// mock_obj.get.return_value = "/api/v1/users"
-/// mock_other.side_effect = "/var/run/socket"
-/// ```
+/// 1. **Direct RHS** — `obj.attr = "/srv/data/file.txt"`. The literal is
+///    the `right` field of the assignment.
+/// 2. **One indirection deeper** — `obj.attr = helper("/home/user/.git")`.
+///    The literal is a direct argument of a `call` that is itself the RHS.
 ///
-/// On these assignments the string is **mock setup data**, not a request
-/// target — flagging it produces noise. cteni's 48-hit rollout cluster is
-/// this exact shape. The walk allows any number of `parenthesized_expression`
-/// wrappers around the literal so a trailing parenthesised RHS still
-/// matches.
-fn is_in_mock_attribute_assignment_rhs(string_node: Node<'_>, source: &str) -> bool {
-    // Climb past parentheses so `mock.return_value = ("...")` matches.
+/// In all of these the string is **setup data attached to an object**
+/// (very often a mock), not an external resource the test opens or fetches
+/// — flagging it produces noise. This generalises the earlier
+/// `return_value` / `side_effect`-only carve-out (cteni's 48-hit cluster)
+/// to any attribute name (esl's `obj.pdf_path = "/etc/hosts"`) and to the
+/// helper-wrapped form (introspect's `mock.return_value =
+/// _make_completed_process("/home/user/.git\n")`). See entry #86.
+///
+/// The walk allows `parenthesized_expression` wrappers around both the
+/// literal and the enclosing call.
+fn is_in_attribute_assignment_rhs(string_node: Node<'_>) -> bool {
     let current = climb_past_parens(string_node);
-    let Some(parent) = current.parent() else {
+
+    // Shape 1: the literal is the direct RHS — `obj.attr = "/path"`.
+    if is_attribute_assignment_rhs(current) {
+        return true;
+    }
+
+    // Shape 2: the literal is a direct argument of a call that is the RHS —
+    // `obj.attr = helper("/path")`. Climb string → argument_list → call,
+    // then check whether that call is the attribute-assignment RHS.
+    let Some(arg_list) = current.parent() else {
+        return false;
+    };
+    if arg_list.kind() != "argument_list" {
+        return false;
+    }
+    let Some(call) = arg_list.parent() else {
+        return false;
+    };
+    if call.kind() != "call" {
+        return false;
+    }
+    is_attribute_assignment_rhs(climb_past_parens(call))
+}
+
+/// Is `node` the direct RHS (`right` field) of an `assignment` whose target
+/// (`left`) is an `attribute`? Chained attributes (`a.b.attr`) qualify —
+/// the target only needs to be an `attribute` node.
+fn is_attribute_assignment_rhs(node: Node<'_>) -> bool {
+    let Some(parent) = node.parent() else {
         return false;
     };
     if parent.kind() != "assignment" {
         return false;
     }
-    // The string must be the RHS (the `right` field), not the LHS.
     let Some(rhs) = parent.child_by_field_name("right") else {
         return false;
     };
-    if rhs.id() != current.id() {
+    if rhs.id() != node.id() {
         return false;
     }
-    // The LHS must be an `attribute` whose attribute is `return_value` or
-    // `side_effect`. Chained attributes (`a.b.return_value`) work because
-    // `attribute`'s `attribute` field is always the rightmost name.
-    let Some(target) = parent.child_by_field_name("left") else {
-        return false;
-    };
-    if target.kind() != "attribute" {
-        return false;
-    }
-    let Some(attr) = target.child_by_field_name("attribute") else {
-        return false;
-    };
-    let Ok(name) = attr.utf8_text(source.as_bytes()) else {
-        return false;
-    };
-    matches!(name, "return_value" | "side_effect")
+    parent.child_by_field_name("left").is_some_and(|target| target.kind() == "attribute")
 }
 
-/// Is `string_node` the LHS of an `in` comparison whose RHS is a
-/// subscript over `.headers`, all wrapped in an `assert_statement`?
+/// Is `string_node` the **LHS operand** of an `in` comparison that is the
+/// asserted expression of an `assert_statement`, where the RHS is a
+/// *dynamic* value (not an inline collection display)?
 ///
-/// Recognises `FastAPI` / Starlette header-assertion patterns:
+/// Recognises substring / membership assertions:
 ///
 /// ```python
+/// assert "/login" in response.text
 /// assert "/foo" in response.headers["location"]
-/// assert "value" in resp.headers["X-Custom"]
+/// assert "value" in resp.content
 /// ```
 ///
-/// The literal here is a **substring check** against the response header
-/// value — it is the expectation being asserted, not a request target.
-/// alma's 2-hit rollout cluster is this shape.
-fn is_in_response_headers_membership_check(string_node: Node<'_>, source: &str) -> bool {
+/// The literal is the **needle** being searched for — a substring
+/// expectation, not a resource the test opens or fetches. This generalises
+/// the earlier `.headers[...]`-only carve-out (alma's 2-hit cluster) to any
+/// dynamic right-hand operand (esl's `assert "/login" in response.text`).
+/// See entry #86.
+///
+/// The RHS must NOT be an inline collection literal: when it is
+/// (`assert "/x" in ["/a", "/b"]`), the URL/path constants are written
+/// directly into the test and still fire — the carve-out is for searching
+/// *runtime* values, not asserting membership in a hand-written list.
+///
+/// Scope notes:
+/// - **`not in` still fires.** `comparison_uses_in_operator` only matches
+///   the bare `in` token; `assert "/x" not in resp.text` asserts the
+///   *absence* of a path, which is a genuine expectation worth flagging,
+///   not a substring lookup.
+/// - **Chained comparisons still fire.** `assert "/a" in b in c` has three
+///   named operands, so the `[lhs, rhs]` destructure below fails and the
+///   literal falls through to the normal path — deliberately, since the
+///   chained shape is not the simple needle-in-value pattern we carve out.
+fn is_in_membership_assert(string_node: Node<'_>) -> bool {
     // Climb past any `parenthesized_expression` wrappers so
-    // `assert ("/x") in resp.headers["L"]` matches the same as the bare
-    // form.
+    // `assert ("/x") in resp.text` matches the same as the bare form.
     let current = climb_past_parens(string_node);
     let Some(comparison) = current.parent() else {
         return false;
@@ -529,29 +566,25 @@ fn is_in_response_headers_membership_check(string_node: Node<'_>, source: &str) 
     if lhs.id() != current.id() {
         return false;
     }
-    // The operator between the two named children must be `in`. Walk
-    // raw children to find the operator token.
+    // The operator between the two named children must be `in`.
     if !comparison_uses_in_operator(comparison) {
         return false;
     }
-    // The RHS must be a `subscript` whose value is an `attribute` chain
-    // ending in `.headers`.
-    if rhs.kind() != "subscript" {
-        return false;
-    }
-    let Some(value) = rhs.child_by_field_name("value") else {
-        return false;
-    };
-    if value.kind() != "attribute" {
-        return false;
-    }
-    let Some(attr) = value.child_by_field_name("attribute") else {
-        return false;
-    };
-    let Ok(name) = attr.utf8_text(source.as_bytes()) else {
-        return false;
-    };
-    if name != "headers" {
+    // Inline collection displays on the RHS are NOT carved out — their
+    // elements are hand-written constants, exactly the thing the rule
+    // flags. Only a dynamic RHS (attribute, subscript, call, identifier)
+    // qualifies as a substring/membership search.
+    if matches!(
+        rhs.kind(),
+        "list"
+            | "tuple"
+            | "set"
+            | "dictionary"
+            | "list_comprehension"
+            | "set_comprehension"
+            | "dictionary_comprehension"
+            | "generator_expression"
+    ) {
         return false;
     }
     // Finally, the comparison must itself be the asserted expression
@@ -1169,18 +1202,76 @@ def test_uses_side_effect():
     }
 
     #[test]
-    fn fires_on_mock_other_attribute_assignment_rhs() {
-        // Only `return_value` and `side_effect` are carved out — other
-        // attribute names (`.url`, `.path`, …) still fire. Locks in the
-        // narrow scope.
+    fn does_not_fire_on_any_attribute_assignment_rhs() {
+        // Entry #86 widened the mock-RHS carve-out: a literal assigned to
+        // ANY object attribute (not just `return_value` / `side_effect`)
+        // is setup data, not a resource the test opens. This was
+        // previously asserted to FIRE (`fires_on_mock_other_attribute_
+        // assignment_rhs`); the requirement changed — esl's
+        // `obj.pdf_path = "/etc/hosts"` is the canonical false-positive.
         let src = "\
-def test_uses_url_attr():
-    mock_obj.url = \"/srv/data/file.txt\"
-    assert mock_obj.url
+def test_uses_pdf_path():
+    obj.pdf_path = \"/etc/hosts\"
+    assert obj.pdf_path
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_helper_wrapped_attribute_rhs() {
+        // Introspect's ~51-hit shape: the path is one indirection deep —
+        // a direct argument of a helper call that is the attribute-RHS.
+        let src = "\
+def test_uses_helper_rhs():
+    mock_run.return_value = _make_completed_process(\"/home/user/.git\")
+    assert mock_run.return_value
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_helper_wrapped_plain_assignment_rhs() {
+        // Guard the attribute-target requirement: the same helper-wrapped
+        // literal assigned to a plain identifier (not an attribute) is NOT
+        // carved out — `path = helper("/etc/hosts")` still fires.
+        let src = "\
+def test_plain_target():
+    path = _make_path(\"/etc/hosts\")
+    assert path
 ";
         let out = run(src);
         assert_eq!(out.len(), 1);
-        assert!(out[0].message.contains("/srv/data/file.txt"));
+        assert!(out[0].message.contains("/etc/hosts"));
+    }
+
+    #[test]
+    fn fires_on_attribute_rhs_two_indirections_deep() {
+        // The indirection is exactly one call deep. A literal nested two
+        // calls deep (`obj.attr = outer(inner("/path"))`) is NOT carved —
+        // it is the argument of `inner`, whose result is an argument of
+        // `outer`, so the literal's grandparent call is not the RHS.
+        let src = "\
+def test_double_wrap():
+    obj.attr = outer(inner(\"/etc/hosts\"))
+    assert obj.attr
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].message.contains("/etc/hosts"));
+    }
+
+    #[test]
+    fn fires_on_plain_identifier_assignment_rhs() {
+        // Sanity: assigning a path to a bare identifier (not an attribute)
+        // is the canonical mystery guest and still fires.
+        let src = "\
+def test_plain():
+    path = \"/etc/hosts\"
+    assert path
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].message.contains("/etc/hosts"));
     }
 
     #[test]
@@ -1195,12 +1286,64 @@ def test_redirect_target():
     }
 
     #[test]
+    fn does_not_fire_on_membership_assert_against_response_text() {
+        // Entry #86 widened the membership carve-out beyond `.headers[...]`
+        // subscripts: esl's `assert "/login" in response.text` searches a
+        // runtime attribute value — the literal is a needle, not a target.
+        let src = "\
+def test_login_link_present():
+    resp = client.get(\"/page\")
+    assert \"/login\" in resp.text
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_not_in_membership_assert() {
+        // `not in` asserts the *absence* of a path — a real expectation,
+        // not a substring lookup. The carve-out matches only the bare `in`
+        // token, so this still fires.
+        let src = "\
+def test_no_login_link():
+    assert \"/login\" not in resp.text
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].message.contains("/login"));
+    }
+
+    #[test]
+    fn fires_on_chained_membership_comparison() {
+        // A chained comparison (`"/a" in b in c`) has three named operands,
+        // so the carve-out's `[lhs, rhs]` destructure fails and the literal
+        // falls through to fire — the chained shape is not the simple
+        // needle-in-runtime-value pattern.
+        let src = "\
+def test_chained():
+    assert \"/login\" in a in resp.text
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].message.contains("/login"));
+    }
+
+    #[test]
+    fn does_not_fire_on_membership_assert_against_call_rhs() {
+        // A dynamic call RHS also qualifies — `assert "/x" in resp.json()`.
+        let src = "\
+def test_body_contains():
+    assert \"/admin\" in resp.json()
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
     fn fires_on_membership_check_when_rhs_is_not_headers_subscript() {
-        // The header-assertion carve-out requires the RHS of `in` to be
-        // a `.headers[...]` subscript. When the RHS is something else
-        // (e.g. a list literal), the literal still fires — the carve-out
-        // is narrowly scoped to the actual FastAPI / Starlette header
-        // pattern.
+        // The membership carve-out (entry #86) excludes inline collection
+        // displays on the RHS. When the RHS is a list literal, every
+        // hand-written URL/path constant still fires — including the LHS
+        // needle. The carve-out only suppresses searches against a dynamic
+        // (non-literal-collection) right-hand operand.
         let src = "\
 def test_in_list_of_urls():
     assert \"/dashboard\" in [\"https://example.com/x\", \"/dashboard\"]
