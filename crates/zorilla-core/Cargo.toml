@@ -10,6 +10,10 @@ authors.workspace = true
 
 [dependencies]
 serde = { workspace = true }
+# Only for `#[derive(ValueEnum)]` on `guide::Topic`, so the CLI can accept a
+# guide topic without restating the variant list. Optional so a library
+# consumer that never touches the guide does not pull clap in.
+clap = { workspace = true, optional = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 ignore = { workspace = true }
@@ -18,6 +22,10 @@ thiserror = { workspace = true }
 globset = { workspace = true }
 tree-sitter = { workspace = true }
 tree-sitter-python = { workspace = true }
+
+[features]
+# Derive `clap::ValueEnum` for `guide::Topic`. Enabled by `zorilla-cli`.
+clap = ["dep:clap"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

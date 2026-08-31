@@ -6,6 +6,7 @@
 //! `ZR001 conditional-test-logic` finding plus the trailing summary line.
 
 use assert_cmd::Command;
+use predicates::prelude::*;
 use predicates::str::contains;
 use tempfile::TempDir;
 
@@ -818,4 +819,99 @@ fn check_on_tree_with_conditional_test_emits_zr001_finding() {
         .stdout(contains("test function has conditional logic"))
         .stdout(contains("tests/test_a.py:2:5:"))
         .stdout(contains("1 findings in 1 files discovered."));
+}
+
+// --- guide ---
+
+#[test]
+fn guide_with_explicit_topic_prints_that_topic() {
+    Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("guide")
+        .arg("tune")
+        .assert()
+        .success()
+        .stdout(contains("# zorilla guide: tune"))
+        .stdout(contains("# zorilla: ignore -- <reason>"));
+}
+
+#[test]
+fn guide_in_an_unconfigured_directory_prints_setup_and_says_why() {
+    // The header is how a reader (usually an agent) knows the topic was chosen
+    // for it rather than asked for.
+    let tmp = TempDir::new().unwrap();
+
+    Command::cargo_bin("zorilla")
+        .unwrap()
+        .current_dir(tmp.path())
+        .arg("guide")
+        .assert()
+        .success()
+        .stdout(contains("# zorilla guide: not configured here -> setup"));
+}
+
+#[test]
+fn guide_in_a_configured_directory_prints_triage_and_names_the_source() {
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("zorilla.toml"), "include = [\"tests/**/*.py\"]\n").unwrap();
+
+    Command::cargo_bin("zorilla")
+        .unwrap()
+        .current_dir(tmp.path())
+        .arg("guide")
+        .assert()
+        .success()
+        .stdout(contains("# zorilla guide: configured via zorilla.toml -> triage"));
+}
+
+#[test]
+fn guide_rejects_an_unknown_topic() {
+    // clap's own rejection, exit 2 — distinguishable from a panic, and from a
+    // silent fallback to the auto-selected topic.
+    Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("guide")
+        .arg("nope")
+        .assert()
+        .code(2)
+        .stderr(contains("setup"));
+}
+
+#[test]
+fn check_text_output_with_findings_ends_with_the_triage_footer() {
+    // The footer has to survive being captured by a hook or an aggregator, so
+    // assert it on real piped stdout rather than only on the renderer.
+    let tmp = TempDir::new().unwrap();
+    let tests = tmp.path().join("tests");
+    std::fs::create_dir_all(&tests).unwrap();
+    std::fs::write(tests.join("test_a.py"), "def test_x():\n    if True:\n        assert True\n")
+        .unwrap();
+
+    Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg(tmp.path())
+        .assert()
+        .code(1)
+        // The footer's position is the point: an aggregator reads the tail.
+        .stdout(predicates::str::ends_with(format!("{}\n", zorilla_core::report_footer())));
+}
+
+#[test]
+fn check_json_output_carries_no_triage_footer() {
+    let tmp = TempDir::new().unwrap();
+    let tests = tmp.path().join("tests");
+    std::fs::create_dir_all(&tests).unwrap();
+    std::fs::write(tests.join("test_a.py"), "def test_x():\n    if True:\n        assert True\n")
+        .unwrap();
+
+    Command::cargo_bin("zorilla")
+        .unwrap()
+        .arg("check")
+        .arg("--format")
+        .arg("json")
+        .arg(tmp.path())
+        .assert()
+        .code(1)
+        .stdout(contains("zorilla guide triage").not());
 }

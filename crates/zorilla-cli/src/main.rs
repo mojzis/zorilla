@@ -10,6 +10,7 @@ use std::process::ExitCode;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
+use zorilla_core::guide::{self, Topic};
 use zorilla_core::{
     compute_overview, compute_stats, format_overview_json, format_overview_text, format_stats_json,
     format_stats_text, lint, lint_with_filter, rule_name_for, rules, ChangedLines, Config,
@@ -43,6 +44,18 @@ enum Command {
         /// for that file. Files not in the manifest are kept entirely.
         #[arg(long, value_name = "FILE", conflicts_with = "files_from")]
         changed_lines: Option<PathBuf>,
+    },
+    /// Print short instructions for using zorilla here.
+    ///
+    /// With no topic, picks `setup` or `triage` by looking for a
+    /// `zorilla.toml`, a `[tool.zorilla]` table in `pyproject.toml`, or a
+    /// `.pre-commit-config.yaml` naming the hook — in that order — in the
+    /// current directory or any directory above it, stopping at the
+    /// repository root. `tune` is a reference and is never auto-selected.
+    Guide {
+        /// Which instructions to print. Omit to have zorilla choose.
+        #[arg(value_enum)]
+        topic: Option<Topic>,
     },
     /// List all available rules.
     ListRules,
@@ -120,6 +133,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Check { paths, format, files_from, files, changed_lines } => {
             check(paths, format, files_from.as_deref(), files, changed_lines.as_deref())
         }
+        Command::Guide { topic } => {
+            print!("{}", guide_output(topic));
+            Ok(ExitCode::SUCCESS)
+        }
         Command::ListRules => Ok(list_rules()),
         Command::Explain { code } => Ok(explain(&code)),
         Command::Stats { paths, format, files_from, files } => {
@@ -129,6 +146,24 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             overview(paths, format, files_from.as_deref(), files)
         }
     }
+}
+
+/// Resolve the guide topic and render it.
+///
+/// Detection runs against the current directory rather than the paths of some
+/// other subcommand: the question `zorilla guide` answers is "is zorilla set up
+/// where I am standing", and the guide tells its reader to stand at the
+/// repository root.
+fn guide_output(topic: Option<Topic>) -> String {
+    if let Some(topic) = topic {
+        return guide::render(topic, guide::Selection::Explicit);
+    }
+    // An absolute directory, because `detect` walks upward and `Path::new(".")`
+    // has no parent to walk to. A cwd we cannot read is "not configured": the
+    // point of `guide` is to print instructions, never to fail.
+    let start = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let source = guide::detect(&start);
+    guide::render(guide::auto_topic(source), guide::Selection::Auto(source))
 }
 
 fn check(
@@ -353,5 +388,86 @@ fn explain(code: &str) -> ExitCode {
     } else {
         eprintln!("zorilla: unknown rule: {code}");
         ExitCode::from(2)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory as _;
+
+    /// Every zorilla command the guides show must be one the CLI accepts.
+    ///
+    /// This lives here rather than in `zorilla-core`'s `guide` module because
+    /// `Cli` is defined in the binary. The extraction it depends on is covered
+    /// by `guide::tests::extraction_finds_every_command_the_guides_show`, so an
+    /// empty extraction cannot pass as "all valid" in either place.
+    #[test]
+    fn every_command_shown_in_a_guide_parses() {
+        let mut checked = 0_usize;
+        for topic in Topic::ALL {
+            for argv in guide::embedded_invocations(topic) {
+                checked += 1;
+                let parsed = Cli::command().try_get_matches_from(&argv);
+                assert!(
+                    parsed.is_ok(),
+                    "guide `{}` shows `{}`, which the CLI rejects: {}",
+                    topic.name(),
+                    argv.join(" "),
+                    parsed.unwrap_err(),
+                );
+            }
+        }
+        assert!(checked >= 6, "expected several commands across the guides, found {checked}");
+    }
+
+    /// An agent that ran `zorilla guide` with no topic needs to know why it got
+    /// what it got, and where to stand when it runs it.
+    #[test]
+    fn guide_help_states_the_auto_selection_rule() {
+        let mut cmd = Cli::command();
+        let guide_cmd = cmd
+            .get_subcommands_mut()
+            .find(|c| c.get_name() == "guide")
+            .expect("the `guide` subcommand should exist");
+        let help = guide_cmd.render_long_help().to_string();
+        assert!(help.contains("setup"), "guide --help should name the setup topic: {help}");
+        assert!(help.contains("triage"), "guide --help should name the triage topic: {help}");
+        assert!(
+            help.contains("never auto-selected"),
+            "guide --help should say tune is never auto-selected: {help}",
+        );
+        // Anchored on wording only the upward walk can honestly claim, so
+        // help that still describes a current-directory-only lookup fails.
+        assert!(
+            help.contains("any directory above"),
+            "guide --help should say detection walks upward: {help}",
+        );
+    }
+
+    #[test]
+    fn guide_topics_parse_as_values() {
+        for topic in Topic::ALL {
+            assert!(
+                Cli::command().try_get_matches_from(["zorilla", "guide", topic.name()]).is_ok(),
+                "`zorilla guide {}` should parse",
+                topic.name(),
+            );
+        }
+        assert!(
+            Cli::command().try_get_matches_from(["zorilla", "guide", "how"]).is_err(),
+            "an unknown topic should be rejected, not silently defaulted",
+        );
+        assert!(
+            Cli::command().try_get_matches_from(["zorilla", "guide"]).is_ok(),
+            "the topic is optional",
+        );
+    }
+
+    #[test]
+    fn explicit_topic_renders_that_topic_and_no_arrow() {
+        let out = guide_output(Some(Topic::Tune));
+        assert!(out.starts_with("# zorilla guide: tune\n"), "got: {out}");
+        assert!(out.ends_with(Topic::Tune.text()), "the docs page is emitted verbatim");
     }
 }

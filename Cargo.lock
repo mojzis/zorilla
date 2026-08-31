@@ -993,6 +993,7 @@ dependencies = [
 name = "zorilla-core"
 version = "0.1.4"
 dependencies = [
+ "clap",
  "globset",
  "ignore",
  "insta",

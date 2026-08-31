@@ -423,6 +423,175 @@ impl Config {
     }
 }
 
+/// The set of keys the [`Config`] deserializer actually accepts.
+///
+/// Derived from serde rather than listed by hand: a struct's `Deserialize` impl
+/// hands its field list to the `Deserializer`, so a deserializer that captures
+/// that list and stops is asking serde the same question the TOML parser asks.
+/// A hand-written list would be a second source of truth, which is exactly what
+/// the guide-key test in [`crate::guide`] exists to catch.
+#[cfg(test)]
+pub(crate) mod keys {
+    use std::collections::BTreeSet;
+    use std::fmt;
+
+    use serde::de::{self, Deserializer, Visitor};
+    use serde::forward_to_deserialize_any;
+
+    use super::{
+        RawConfig, RawRuleCommon, RawRules, RawZr003, RawZr004, RawZr005, RawZr006, RawZr008,
+    };
+
+    /// Carries the captured field list out through serde's error channel, which
+    /// is the only way out of a `Deserializer` that refuses to produce a value.
+    #[derive(Debug)]
+    pub struct Captured(Vec<&'static str>);
+
+    impl fmt::Display for Captured {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "captured fields: {:?}", self.0)
+        }
+    }
+
+    impl std::error::Error for Captured {}
+
+    impl de::Error for Captured {
+        fn custom<T: fmt::Display>(_msg: T) -> Self {
+            Self(Vec::new())
+        }
+    }
+
+    /// A `Deserializer` that answers "what fields does this struct have?" and
+    /// nothing else.
+    struct FieldCapture;
+
+    impl<'de> Deserializer<'de> for FieldCapture {
+        type Error = Captured;
+
+        fn deserialize_struct<V: Visitor<'de>>(
+            self,
+            _name: &'static str,
+            fields: &'static [&'static str],
+            _visitor: V,
+        ) -> Result<V::Value, Captured> {
+            Err(Captured(fields.to_vec()))
+        }
+
+        fn deserialize_any<V: Visitor<'de>>(self, _visitor: V) -> Result<V::Value, Captured> {
+            Err(Captured(Vec::new()))
+        }
+
+        forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf option unit unit_struct newtype_struct seq tuple
+            tuple_struct map enum identifier ignored_any
+        }
+    }
+
+    /// The field names `T`'s derived `Deserialize` will accept, after serde
+    /// renames — so `RawRules` reports `ZR001`, not `zr001`.
+    fn field_names<T: serde::de::DeserializeOwned>() -> Vec<&'static str> {
+        match T::deserialize(FieldCapture) {
+            Err(Captured(fields)) => fields,
+            Ok(_) => Vec::new(),
+        }
+    }
+
+    /// Keys accepted directly under `[tool.zorilla]` / at the root of
+    /// `zorilla.toml` — `include`, `exclude` and the `rules` table itself.
+    pub fn top_level_keys() -> Vec<&'static str> {
+        field_names::<RawConfig>()
+    }
+
+    /// Every rule code the `[rules]` table deserializes, e.g. `ZR001`.
+    pub fn rule_codes() -> Vec<&'static str> {
+        field_names::<RawRules>()
+    }
+
+    /// The keys accepted under `[rules.<code>]`, or `None` for an unknown code.
+    ///
+    /// The match is hand-written because each code deserializes into its own
+    /// struct; `every_rule_code_has_a_key_list` holds it to `rule_codes()` so a
+    /// new code cannot be added without landing here too.
+    pub fn keys_for_code(code: &str) -> Option<Vec<&'static str>> {
+        Some(match code {
+            "ZR001" | "ZR002" | "ZR007" => field_names::<RawRuleCommon>(),
+            "ZR003" => field_names::<RawZr003>(),
+            "ZR004" => field_names::<RawZr004>(),
+            "ZR005" => field_names::<RawZr005>(),
+            "ZR006" => field_names::<RawZr006>(),
+            "ZR008" => field_names::<RawZr008>(),
+            _ => return None,
+        })
+    }
+
+    /// Every per-rule key, qualified as `CODE.key`.
+    ///
+    /// Qualified only, never bare: `max_asserts` is accepted under `ZR004` and
+    /// silently discarded anywhere else, so a set that also held the bare name
+    /// would wave through `[tool.zorilla] max_asserts = 6` — exactly the drift
+    /// the guide tests exist to catch. Top-level keys are checked against
+    /// [`top_level_keys`] instead.
+    pub fn qualified_rule_keys() -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for code in rule_codes() {
+            let fields =
+                keys_for_code(code).unwrap_or_else(|| panic!("no key list for rule code `{code}`"));
+            for field in fields {
+                out.insert(format!("{code}.{field}"));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn capture_reports_the_fields_toml_accepts() {
+        let top = top_level_keys();
+        assert!(top.contains(&"include"), "top-level keys should include `include`: {top:?}");
+        assert!(top.contains(&"exclude"), "top-level keys should include `exclude`: {top:?}");
+        assert!(top.contains(&"rules"), "top-level keys should include `rules`: {top:?}");
+    }
+
+    #[test]
+    fn rule_codes_come_back_renamed_to_uppercase() {
+        let codes = rule_codes();
+        assert!(codes.contains(&"ZR001"), "serde renames should surface: {codes:?}");
+        assert!(codes.contains(&"ZR008"), "serde renames should surface: {codes:?}");
+        assert!(
+            !codes.iter().any(|c| c.starts_with("zr")),
+            "the captured names are the TOML-facing ones, not the Rust fields: {codes:?}",
+        );
+    }
+
+    #[test]
+    fn every_rule_code_has_a_key_list() {
+        for code in rule_codes() {
+            let keys = keys_for_code(code)
+                .unwrap_or_else(|| panic!("`keys_for_code` has no arm for `{code}`"));
+            assert!(
+                keys.contains(&"enabled"),
+                "every rule table accepts `enabled`; `{code}` reported {keys:?}",
+            );
+        }
+        assert_eq!(keys_for_code("ZR999"), None, "an unknown code has no key list");
+    }
+
+    #[test]
+    fn qualified_rule_keys_are_scoped_to_the_rule_that_defines_them() {
+        let keys = qualified_rule_keys();
+        assert!(keys.contains("ZR004.max_asserts"), "qualified knob should be accepted");
+        assert!(keys.contains("ZR003.extra_helpers"), "qualified knob should be accepted");
+        assert!(
+            !keys.contains("ZR003.max_asserts"),
+            "a knob must not be accepted under a rule that does not define it",
+        );
+        assert!(
+            !keys.contains("max_asserts"),
+            "the bare form would wave through a knob written at the top level",
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
