@@ -194,6 +194,12 @@ pub fn format_overview_text(overview: &OverviewReport, use_color: bool) -> Strin
         let _ = writeln!(out, "{} clean files not shown.", overview.clean_files.len());
     }
 
+    // Same rule as the `check` text report: a footer only where there is
+    // something to act on. Never coloured — it has to survive being piped.
+    if overview.summary.total_findings > 0 {
+        crate::guide::push_report_footer(&mut out);
+    }
+
     out
 }
 
@@ -394,6 +400,34 @@ mod tests {
         assert_eq!(overview.summary.files_with_findings, 2);
         let cleans: Vec<_> = overview.clean_files.iter().map(|p| p.display().to_string()).collect();
         assert_eq!(cleans, vec!["tests/test_clean_x.py", "tests/test_clean_y.py"]);
+    }
+
+    #[test]
+    fn overview_text_with_findings_points_at_the_triage_guide() {
+        let report = Report {
+            findings: vec![finding("ZR001", "tests/test_a.py", 12, 5)],
+            files_discovered: 1,
+            discovered_files: vec![PathBuf::from("tests/test_a.py")],
+        };
+        let text = format_overview_text(&compute_overview(&report), false);
+        assert!(
+            text.contains("zorilla guide triage"),
+            "footer should point at the triage guide, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn overview_text_without_findings_omits_the_triage_footer() {
+        let report = Report {
+            findings: Vec::new(),
+            files_discovered: 1,
+            discovered_files: vec![PathBuf::from("tests/test_clean.py")],
+        };
+        let text = format_overview_text(&compute_overview(&report), false);
+        assert!(
+            !text.contains("zorilla guide triage"),
+            "a clean run has nothing to triage, got:\n{text}"
+        );
     }
 
     #[test]

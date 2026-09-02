@@ -16,3 +16,12 @@ publish = false
 
 # Run pre-release checks
 verify = true
+
+# The pre-commit `rev:` pin is copy-pasted verbatim by readers, so it has to move
+# with the version. `docs/guide/setup.md` is additionally test-enforced
+# (`guide::tests::setup_pins_the_current_release`), which would fail CI on the
+# release commit itself if the bump were left to a human.
+pre-release-replacements = [
+  { file = "docs/guide/setup.md", search = "rev: v[0-9]+\\.[0-9]+\\.[0-9]+", replace = "rev: v{{version}}" },
+  { file = "README.md", search = "rev: v[0-9]+\\.[0-9]+\\.[0-9]+", replace = "rev: v{{version}}" },
+]

@@ -1,6 +1,6 @@
 - id: zorilla
   name: zorilla (pytest test-smell linter)
-  description: Lint pytest tests for syntactic test smells (ZR001–ZR007).
+  description: Lint pytest tests for syntactic test smells (ZR001-ZR008).
   entry: zorilla check
   language: python
   types: [python]

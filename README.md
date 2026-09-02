@@ -6,7 +6,7 @@ pytest codebases. Built to compose with
 and with ruff's `PT` rules — zorilla owns only the gaps those two leave
 behind.
 
-> **Status:** v0.1 ready. Ships seven rules (ZR001–ZR007), inline and
+> **Status:** v0.1 ready. Ships eight rules (ZR001–ZR008), inline and
 > file-level suppression comments, `text` / `json` / `sarif` output
 > formats, a `list-rules` / `explain` pair, and a pre-commit hook.
 
@@ -49,6 +49,7 @@ Exit codes: `0` clean, `1` findings reported, `2` error.
 | ZR005  | mystery-guest           | Absolute path, URL, or `~`-path literal inside a test    |
 | ZR006  | patch-stack             | Too many stacked `@patch` / `@mock.patch` decorators     |
 | ZR007  | empty-test              | Test body is empty (`pass`, `...`, docstring-only)       |
+| ZR008  | context-patch-stack     | Too many `with patch(...)` context managers in one test   |
 
 Long-form docs (motivation, positive/negative examples, config knobs,
 suppression syntax) live under [`docs/rules/`](./docs/rules/). You can
@@ -74,6 +75,8 @@ $ zorilla check .
 tests/test_demo.py:4:5: ZR001 conditional-test-logic: test function has conditional logic (if/for/while/try)
 tests/test_demo.py:5:9: ZR002 sleep-in-test: test calls sleep — wait on a condition instead
 2 findings in 1 files discovered.
+
+Findings are not verdicts. Run `zorilla guide triage` for the remedy ladder, including when `# zorilla: ignore -- <reason>` is the right answer.
 ```
 
 zorilla exits with status `1` because findings were reported. A clean
@@ -154,6 +157,7 @@ Breakdown by rule:
   ZR005 mystery-guest:           0
   ZR006 patch-stack:             0
   ZR007 empty-test:              0
+  ZR008 context-patch-stack:     0
 ```
 
 Add `--format json` to emit a parseable summary (flat counters plus a
@@ -181,6 +185,8 @@ tests/test_returns.py  2 findings
   ● 18:5  ZR003 no-assertion           test has no assertion
 
 9 clean files not shown.
+
+Findings are not verdicts. Run `zorilla guide triage` for the remedy ladder, including when `# zorilla: ignore -- <reason>` is the right answer.
 ```
 
 The bullet (`●`) is coloured by severity — yellow for warnings, red for
@@ -189,6 +195,33 @@ convention](https://no-color.org/), and emits plain bullets when output
 is piped or redirected. Add `--format json` to get the same data as a
 structured document (`summary`, `files`, `clean_files`) suitable for
 dashboards or scripting.
+
+### Guide
+
+`zorilla guide` prints short, imperative instructions for the three moments
+someone — or a coding agent — meets zorilla. With no topic it picks between
+`setup` and `triage` by looking at the current directory and every directory
+above it, stopping at the repository root:
+
+```
+$ zorilla guide
+# zorilla guide: configured via pyproject.toml [tool.zorilla] -> triage
+...
+```
+
+| Topic | For |
+| ----- | --- |
+| `setup` | zorilla is not wired into this repository yet |
+| `triage` | a check run reported findings; what to do about each code |
+| `tune` | suppression syntax, scope globs, per-rule knobs, precedence |
+
+`tune` is a reference and is never auto-selected. The prose lives in
+[`docs/guide/`](./docs/guide/) and is compiled into the binary with
+`include_str!`, so the files and the CLI serve the same bytes.
+
+Any `check` or `overview` text report that has findings ends with a one-line
+footer pointing back at `zorilla guide triage` — the breadcrumb from a failed
+gate to the instructions for clearing it. JSON and SARIF never carry it.
 
 ### List and explain
 
@@ -202,6 +235,7 @@ ZR004 assertion-roulette        on
 ZR005 mystery-guest             on
 ZR006 patch-stack               on
 ZR007 empty-test                on
+ZR008 context-patch-stack       on
 ```
 
 ```
@@ -220,7 +254,7 @@ Add zorilla to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/mojzis/zorilla
-    rev: v0.1.0
+    rev: v0.1.4
     hooks:
       - id: zorilla
 ```
@@ -228,8 +262,8 @@ repos:
 The hook entry point is `zorilla check`; pre-commit appends only the
 staged Python files as positional arguments, so zorilla lints each one
 directly (bypassing the `include` globs the way any explicit file path
-does). `v0.1.0` is the target release tag — replace it with whichever
-tag is current when you wire the hook up.
+does). Replace the `rev:` with whichever tag is current when you wire the
+hook up.
 
 ## Configuration
 
@@ -255,6 +289,9 @@ to disable the rule and any rule-specific knobs (`max_asserts` for
 ZR004, `max_patches` for ZR006, `extra_helpers` for ZR003,
 `allowed_prefixes` for ZR005). See [`docs/rules/`](./docs/rules/) for
 the exhaustive list.
+
+`zorilla guide tune` prints the whole reference — knobs, scope globs,
+suppression syntax and precedence — without leaving the terminal.
 
 Suppression comments work per-line and per-file:
 

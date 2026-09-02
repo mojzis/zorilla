@@ -9,6 +9,7 @@ pub mod ast;
 pub mod changed_lines;
 pub mod config;
 pub mod discovery;
+pub mod guide;
 pub mod overview;
 pub mod parse;
 pub mod report;
@@ -23,6 +24,7 @@ use rayon::prelude::*;
 pub use changed_lines::{ChangedLines, ManifestError};
 pub use config::{Config, RuleConfig};
 pub use discovery::{discover, DiscoveryError};
+pub use guide::report_footer;
 pub use overview::{
     compute_overview, format_overview_json, format_overview_text, FileOverview, OverviewReport,
     OverviewSummary,

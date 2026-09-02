@@ -117,6 +117,12 @@ impl Report {
 
         buf.push_str(&self.summary_line());
         buf.push('\n');
+        // Only when there is something to act on: a clean run has nothing to
+        // triage, and a footer under `0 findings` is noise on every green
+        // build. Text only — JSON and SARIF go to parsers.
+        if !self.findings.is_empty() {
+            crate::guide::push_report_footer(&mut buf);
+        }
         buf
     }
 
@@ -481,12 +487,19 @@ mod tests {
             discovered_files: Vec::new(),
         };
         let out = report.render_text(Path::new("/tmp/root"), name_lookup);
-        let expected = "\
+        // The footer is composed from `guide::report_footer` rather than
+        // spelled out, so rewording it stays a one-file change.
+        let expected = format!(
+            "\
 tests/test_a.py:1:1: ZR001 conditional-test-logic: test function has conditional logic (if/for/while/try)
 tests/test_a.py:5:1: ZR001 conditional-test-logic: test function has conditional logic (if/for/while/try)
 tests/test_b.py:3:1: ZR001 conditional-test-logic: test function has conditional logic (if/for/while/try)
 3 findings in 2 files discovered.
-";
+
+{}
+",
+            crate::guide::report_footer(),
+        );
         assert_eq!(out, expected);
     }
 
@@ -496,6 +509,52 @@ tests/test_b.py:3:1: ZR001 conditional-test-logic: test function has conditional
             Report { findings: Vec::new(), files_discovered: 0, discovered_files: Vec::new() };
         let out = report.render_text(Path::new(""), name_lookup);
         assert_eq!(out, "0 findings in 0 files discovered.\n");
+    }
+
+    #[test]
+    fn text_output_with_findings_points_at_the_triage_guide() {
+        // A failed gate captures stdout; the footer is the only breadcrumb
+        // from that captured text to the instructions for acting on it.
+        let report = Report {
+            findings: vec![Finding {
+                code: "ZR001",
+                message: "test function has conditional logic".into(),
+                file: PathBuf::from("tests/test_a.py"),
+                line: 2,
+                column: 5,
+                severity: Severity::Warning,
+            }],
+            files_discovered: 1,
+            discovered_files: Vec::new(),
+        };
+        let out = report.render_text(Path::new(""), name_lookup);
+        assert!(
+            out.contains("zorilla guide triage"),
+            "footer should point at the triage guide, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn json_and_sarif_omit_the_triage_footer() {
+        // Both formats feed parsers. A trailing prose line would break them.
+        let report = Report {
+            findings: vec![Finding {
+                code: "ZR001",
+                message: "test function has conditional logic".into(),
+                file: PathBuf::from("tests/test_a.py"),
+                line: 2,
+                column: 5,
+                severity: Severity::Warning,
+            }],
+            files_discovered: 1,
+            discovered_files: Vec::new(),
+        };
+        for rendered in [report.render_json(Path::new("")), report.render_sarif(Path::new(""))] {
+            assert!(
+                !rendered.contains("zorilla guide triage"),
+                "machine formats carry no footer, got:\n{rendered}"
+            );
+        }
     }
 
     #[test]

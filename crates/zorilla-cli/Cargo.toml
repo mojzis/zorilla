@@ -13,7 +13,7 @@ name = "zorilla"
 path = "src/main.rs"
 
 [dependencies]
-zorilla-core = { path = "../zorilla-core" }
+zorilla-core = { path = "../zorilla-core", features = ["clap"] }
 clap = { workspace = true }
 anyhow = { workspace = true }
 
