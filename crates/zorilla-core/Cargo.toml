@@ -1,6 +1,6 @@
 [package]
 name = "zorilla-core"
-version = "0.2.0"
+version = "0.2.1"
 description = "Core library for zorilla — pytest test-smell linter"
 edition.workspace = true
 rust-version.workspace = true
