@@ -46,6 +46,12 @@
 //!   `assert "/x" in resp.headers["h"]`) — the literal is a substring
 //!   needle searched in a runtime value, not a request target. An inline
 //!   collection RHS (`assert "/x" in ["/a", "/b"]`) still fires.
+//! - **Equality assert** (`assert url == "/x"`,
+//!   `assert links == ["/a", "https://b"]`) — the literal is the expected
+//!   value of a runtime result, i.e. test data, not a resource the test
+//!   opens. Both operand orders and `!=` qualify; an inline collection of
+//!   literals as the *other* operand does not, and neither does a literal
+//!   compared against another literal.
 //! - **Pytest fixture body** — strings inside a `@pytest.fixture` function
 //!   are fixture data.
 //! - **URL kwarg value** (1c) — when the literal is the *value* of a
@@ -188,6 +194,7 @@ impl Rule for MysteryGuestRule {
                     && !is_in_test_client_call(node, ctx.source)
                     && !is_in_attribute_assignment_rhs(node)
                     && !is_in_membership_assert(node)
+                    && !is_in_equality_assert(node)
                     && !is_in_pytest_fixture_function(node, ctx.source)
                     && !is_in_url_kwarg(node, ctx.source)
                     && !is_in_url_dict_pair(node, ctx.source)
@@ -598,6 +605,118 @@ fn is_in_membership_assert(string_node: Node<'_>) -> bool {
     let mut cursor = assert_stmt.walk();
     let mut first = assert_stmt.named_children(&mut cursor);
     first.next().map(|n| n.id()) == Some(comparison.id())
+}
+
+/// Is `string_node` an expected value in an equality assertion —
+/// `assert result == "/x"`, `assert "/x" == result`, `assert result != "/x"`,
+/// or an element of an inline collection compared that way,
+/// `assert links == ["/a", "https://b"]`?
+///
+/// A program that *produces* paths and URLs has tests that state the
+/// expected output as a literal, and that literal is test data: nothing
+/// opens it, nothing fetches it. The aesop suite hit this on `"/biston/"`,
+/// `"/static/img/x.svg"` and `"https://x"`, all sitting on one side of an
+/// `assert ==`.
+///
+/// Boundaries, each deliberate:
+///
+/// - The comparison must be the asserted expression itself, so a `==`
+///   buried in a call argument (`assert check(url == "/x")`) still fires.
+/// - Exactly two operands: a chained `assert a == "/x" == b` falls through.
+/// - The *other* operand must be dynamic. `assert "/x" == "/x"` compares two
+///   literals and is not an expectation about a runtime value; an inline
+///   collection on the other side (`assert "/x" == ["/x"]`) is the same.
+/// - Only `==` and `!=`. Ordering operators say nothing about identity.
+/// - Nesting: the literal may sit inside a list, tuple, set or dictionary
+///   display (as a value or a key) that is one operand, arbitrarily deep, but
+///   not inside a call or subscript on the way up — `open("/x") == y` is
+///   still a mystery guest.
+fn is_in_equality_assert(string_node: Node<'_>) -> bool {
+    // Climb from the literal through the collection displays that contain it
+    // to the node that is a direct operand of the comparison.
+    let mut operand = climb_past_parens(string_node);
+    loop {
+        let Some(parent) = operand.parent() else {
+            return false;
+        };
+        match parent.kind() {
+            "list" | "tuple" | "set" | "dictionary" | "pair" | "parenthesized_expression" => {
+                operand = parent;
+            }
+            "comparison_operator" => break,
+            _ => return false,
+        }
+    }
+    let Some(comparison) = operand.parent() else {
+        return false;
+    };
+    let mut cursor = comparison.walk();
+    let named: Vec<Node<'_>> = comparison.named_children(&mut cursor).collect();
+    let [lhs, rhs] = named.as_slice() else {
+        return false;
+    };
+    let other = if lhs.id() == operand.id() {
+        *rhs
+    } else if rhs.id() == operand.id() {
+        *lhs
+    } else {
+        return false;
+    };
+    if !comparison_uses_equality_operator(comparison) {
+        return false;
+    }
+    // The other side has to be something the test computed: a literal or an
+    // inline collection there makes the assert a statement about constants.
+    if matches!(
+        climb_past_parens_down(other).kind(),
+        "string"
+            | "concatenated_string"
+            | "list"
+            | "tuple"
+            | "set"
+            | "dictionary"
+            | "list_comprehension"
+            | "set_comprehension"
+            | "dictionary_comprehension"
+            | "generator_expression"
+    ) {
+        return false;
+    }
+    let Some(assert_stmt) = comparison.parent() else {
+        return false;
+    };
+    if assert_stmt.kind() != "assert_statement" {
+        return false;
+    }
+    let mut cursor = assert_stmt.walk();
+    let mut first = assert_stmt.named_children(&mut cursor);
+    first.next().map(|n| n.id()) == Some(comparison.id())
+}
+
+/// The expression inside any number of `parenthesized_expression` wrappers,
+/// walking *down*: `("/x")` is the string, for the purpose of deciding
+/// whether an operand is a literal.
+fn climb_past_parens_down(node: Node<'_>) -> Node<'_> {
+    let mut current = node;
+    while current.kind() == "parenthesized_expression" {
+        let mut cursor = current.walk();
+        let Some(inner) = current.named_children(&mut cursor).next() else {
+            break;
+        };
+        current = inner;
+    }
+    current
+}
+
+/// Returns `true` if the operator token of `comparison_operator` is `==` or
+/// `!=`. The token is an unnamed child, like `in` in
+/// [`comparison_uses_in_operator`].
+fn comparison_uses_equality_operator(comparison: Node<'_>) -> bool {
+    let mut cursor = comparison.walk();
+    let found = comparison
+        .children(&mut cursor)
+        .any(|child| !child.is_named() && matches!(child.kind(), "==" | "!="));
+    found
 }
 
 /// Returns `true` if any of `comparison_operator`'s **unnamed** child
@@ -1537,5 +1656,135 @@ def test_var_key():
         let out = run(src);
         assert_eq!(out.len(), 1);
         assert!(out[0].message.contains("https://leak.example/"));
+    }
+
+    // --- Equality-assert carve-out ---
+
+    #[test]
+    fn does_not_fire_on_expected_path_in_equality_assert() {
+        // aesop generates URLs; its tests state the expected output as a
+        // literal. That is test data, not a resource the test reaches for.
+        let src = "\
+def test_tool_page_url():
+    assert page_url(\"biston\") == \"/biston/\"
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_literal_on_the_left_of_equality_assert() {
+        let src = "\
+def test_logo_path():
+    assert \"/static/img/x.svg\" == logo_path(\"x\")
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_url_in_inequality_assert() {
+        let src = "\
+def test_home_is_not_external():
+    assert home_url() != \"https://x\"
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_expected_collection_in_equality_assert() {
+        // The expected value can be a whole list of paths; every element is
+        // still test data.
+        let src = "\
+def test_nav_links():
+    assert nav_links() == [\"/biston/\", \"/zorilla/\", (\"https://x\", \"/y\")]
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_expected_dict_in_equality_assert() {
+        let src = "\
+def test_asset_map():
+    assert asset_map() == {\"logo\": \"/static/img/x.svg\", \"/y\": 1}
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_parenthesised_operand_in_equality_assert() {
+        let src = "\
+def test_parens():
+    assert (page_url(\"biston\")) == (\"/biston/\")
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_equality_between_two_literals() {
+        // Nothing runtime on either side: the assert is a statement about
+        // constants, and the carve-out is for expected *results*.
+        let src = "\
+def test_constant():
+    assert \"/etc/hosts\" == \"/etc/hosts\"
+";
+        assert_eq!(run(src).len(), 2);
+    }
+
+    #[test]
+    fn fires_on_equality_against_an_inline_collection_of_literals() {
+        let src = "\
+def test_constant_list():
+    assert \"/etc/hosts\" == [\"/etc/hosts\"]
+";
+        assert_eq!(run(src).len(), 2);
+    }
+
+    #[test]
+    fn fires_on_ordering_comparison() {
+        let src = "\
+def test_ordering():
+    assert path < \"/etc/hosts\"
+";
+        assert_eq!(run(src).len(), 1);
+    }
+
+    #[test]
+    fn fires_on_chained_equality() {
+        let src = "\
+def test_chained():
+    assert a == \"/etc/hosts\" == b
+";
+        assert_eq!(run(src).len(), 1);
+    }
+
+    #[test]
+    fn fires_on_equality_that_is_not_the_asserted_expression() {
+        // A comparison as a call argument is not an assertion about the
+        // literal; the literal is still an argument to something.
+        let src = "\
+def test_nested():
+    assert check(url == \"https://x\")
+";
+        assert_eq!(run(src).len(), 1);
+    }
+
+    #[test]
+    fn fires_on_literal_reached_through_a_call_inside_the_operand() {
+        // `open("/etc/hosts").read() == y` opens the path; the comparison is
+        // incidental.
+        let src = "\
+def test_reads_then_compares():
+    assert open(\"/etc/hosts\").read() == expected
+";
+        assert_eq!(run(src).len(), 1);
+    }
+
+    #[test]
+    fn fires_on_equality_outside_an_assert() {
+        let src = "\
+def test_compares_outside_assert():
+    same = url == \"https://x\"
+    assert same
+";
+        assert_eq!(run(src).len(), 1);
     }
 }

@@ -19,8 +19,7 @@ exclude = ["**/fixtures/**", "**/vendor/**"]
 ```
 
 A `zorilla.toml` at the root is the alternative; it wins over `pyproject.toml`.
-Leave the per-rule knobs alone for now -- `zorilla guide tune` covers them once
-you have numbers to tune against.
+Leave the per-rule knobs alone until you have numbers: `zorilla guide tune`.
 
 **3. Baseline before you gate.** Run `zorilla check .` and resolve or suppress
 every finding it reports before wiring zorilla into any gate; run
@@ -29,20 +28,23 @@ weight, and `zorilla stats .` shows which rules do. Adding a linter to a dirty
 repository's gate gets the linter removed, not the smells.
 
 **4. Integrate.** Add `zorilla check .` to the check aggregator this repository
-already has. The aggregator runs the full tree and has no diff context. With
-poethepoet:
+already has - poethepoet, `just`, `make`, `nox`: one recipe, one command. It
+runs the full tree and has no diff context. `check` exits 1 on findings, 0
+when clean and 2 when zorilla could not run. `stats` and `overview` always
+exit 0, so gate on `check` and nothing else.
+
+For a commit hook, as a madoqua step in `pyproject.toml`:
 
 ```toml
-[tool.poe.tasks]
-smells = "zorilla check ."
-check = ["lint", "typecheck", "smells"]
+[tool.madoqua]
+extend_check = [{ name = "zorilla", cmd = "zorilla check" }]
 ```
 
-`just`, `make` and `nox` are the same shape: one recipe, one command. `check`
-exits 1 on findings, 0 when clean and 2 when zorilla could not run. `stats` and
-`overview` always exit 0, so gate on `check` and nothing else.
-
-For a commit hook, with pre-commit or prek:
+madoqua appends the staged Python files, so the step lints exactly those.
+Any path list is valid - `zorilla check tests a.py b.py` lints the directory
+and both files - and named paths bypass `include`, though `exclude` still
+applies. With pre-commit or prek the framework passes the staged files the
+same way:
 
 ```yaml
 - repo: https://github.com/mojzis/zorilla
@@ -51,10 +53,8 @@ For a commit hook, with pre-commit or prek:
     - id: zorilla
 ```
 
-The hook passes the staged files as positional arguments, which bypass
-`include` -- though `exclude` still applies, so a staged file under an excluded
-tree is skipped. Do not hand-roll a `git diff | zorilla check --files-from -`
-hook: an empty list is indistinguishable from no argument, and zorilla falls
-back to scanning the whole tree.
+Do not hand-roll a `git diff | zorilla check --files-from -` hook: an empty
+list is indistinguishable from no argument, and zorilla falls back to
+scanning the whole tree.
 
 next: run `zorilla check .`

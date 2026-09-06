@@ -487,6 +487,18 @@ mod tests {
     }
 
     #[test]
+    fn setup_wires_zorilla_into_madoqua_and_says_a_path_list_is_valid() {
+        // Braindump todo 132: the aesop dogfood set `pass_files = false`
+        // blind because the guide did not say what a trailing file list does.
+        let text = Topic::Setup.text().split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(text.contains("[tool.madoqua]"), "setup should show the madoqua step");
+        assert!(
+            text.contains("`zorilla check tests a.py b.py` lints the directory and both files"),
+            "setup should say a mixed path list is valid",
+        );
+    }
+
+    #[test]
     fn tune_documents_the_reason_syntax_and_precedence() {
         let text = Topic::Tune.text();
         assert!(text.contains("# zorilla: ignore -- <reason>"), "tune should show the reason form",);
