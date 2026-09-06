@@ -46,7 +46,7 @@ For a commit hook, with pre-commit or prek:
 
 ```yaml
 - repo: https://github.com/mojzis/zorilla
-  rev: v0.1.4
+  rev: v0.2.0
   hooks:
     - id: zorilla
 ```
