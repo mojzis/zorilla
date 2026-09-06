@@ -21,7 +21,12 @@ verify = true
 # with the version. `docs/guide/setup.md` is additionally test-enforced
 # (`guide::tests::setup_pins_the_current_release`), which would fail CI on the
 # release commit itself if the bump were left to a human.
-pre-release-replacements = [
-  { file = "docs/guide/setup.md", search = "rev: v[0-9]+\\.[0-9]+\\.[0-9]+", replace = "rev: v{{version}}" },
-  { file = "README.md", search = "rev: v[0-9]+\\.[0-9]+\\.[0-9]+", replace = "rev: v{{version}}" },
-]
+#
+# Replacement paths resolve relative to each crate's manifest dir and every
+# crate runs them, so they live in `crates/zorilla-cli/Cargo.toml` under
+# `[package.metadata.release]` rather than here.
+
+# One workspace-wide `v{{version}}` tag (the release workflow triggers on `v*`),
+# not per-crate `<crate>-v{{version}}` tags.
+shared-version = true
+tag-prefix = ""
