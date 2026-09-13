@@ -13,7 +13,7 @@
 //!
 //! Rule-specific config shapes defined so far: [`Zr003Config`] (assertion
 //! helpers), [`Zr004Config`] (`max_asserts`), [`Zr005Config`]
-//! (`allowed_prefixes`), [`Zr006Config`] (`max_patches`), and
+//! (`allowed_prefixes`, `extra_pure_callees`), [`Zr006Config`] (`max_patches`), and
 //! [`Zr008Config`] (`max_patches` for context-manager patches). Future
 //! phases add more.
 
@@ -77,6 +77,28 @@ pub const DEFAULT_ZR003_HELPERS: &[&str] = &[
     "assertMultiLineEqual",
     "assertSequenceEqual",
     "fail",
+];
+
+/// Built-in parse-only call targets for ZR005.
+///
+/// A string literal passed **directly** to one of these is parser input,
+/// not a resource the test opens: `urlparse("https://…")` and
+/// `PurePosixPath("/…")` cannot perform I/O on their argument by
+/// construction. Match is by the **final identifier** of the call target,
+/// so `urllib.parse.urlparse(...)` and a bare `urlparse(...)` both match.
+///
+/// `Path` is deliberately absent: `Path("/etc/x")` is usually followed by
+/// `.read_text()`, which is exactly the mystery guest the rule exists for.
+/// Suites that use absolute paths as parser input opt in via
+/// `[tool.zorilla.rules.ZR005] extra_pure_callees = ["Path"]`.
+pub const DEFAULT_ZR005_PURE_CALLEES: &[&str] = &[
+    "urlparse",
+    "urlsplit",
+    "urljoin",
+    "urldefrag",
+    "PurePath",
+    "PurePosixPath",
+    "PureWindowsPath",
 ];
 
 /// Effective configuration after merging file + defaults.
@@ -155,7 +177,7 @@ impl Default for Zr004Config {
 }
 
 /// Typed knobs for `ZR005 mystery-guest`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Zr005Config {
     /// String-literal prefixes that are *not* flagged as mystery guests.
     ///
@@ -165,6 +187,21 @@ pub struct Zr005Config {
     /// Empty-string entries are stripped at load time (an empty prefix
     /// would silence every literal — almost always a config typo).
     pub allowed_prefixes: Vec<String>,
+    /// Merged set of built-in + user-supplied parse-only call targets.
+    ///
+    /// A literal that is a direct positional argument of a call whose
+    /// final identifier is in this set is parser input, not a resource.
+    /// See [`DEFAULT_ZR005_PURE_CALLEES`].
+    pub pure_callees: HashSet<String>,
+}
+
+impl Default for Zr005Config {
+    fn default() -> Self {
+        Self {
+            allowed_prefixes: Vec::new(),
+            pure_callees: DEFAULT_ZR005_PURE_CALLEES.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
 }
 
 /// Typed knobs for `ZR006 patch-stack`.
@@ -255,6 +292,8 @@ struct RawZr005 {
     enabled: Option<bool>,
     #[serde(default)]
     allowed_prefixes: Option<Vec<String>>,
+    #[serde(default)]
+    extra_pure_callees: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize, Clone)]
@@ -408,6 +447,13 @@ impl Config {
             .filter(|p| !p.is_empty())
             .collect();
 
+        // Empty entries are inert here (no call target has an empty final
+        // identifier), so unlike `allowed_prefixes` nothing is stripped.
+        let mut pure_callees = Zr005Config::default().pure_callees;
+        if let Some(extra) = &self.rules.zr005.extra_pure_callees {
+            pure_callees.extend(extra.iter().cloned());
+        }
+
         let max_patches = self.rules.zr006.max_patches.unwrap_or(DEFAULT_ZR006_MAX_PATCHES);
 
         let zr008_max_patches = self.rules.zr008.max_patches.unwrap_or(DEFAULT_ZR008_MAX_PATCHES);
@@ -416,7 +462,7 @@ impl Config {
             disabled,
             zr003: Zr003Config { helpers },
             zr004: Zr004Config { max_asserts },
-            zr005: Zr005Config { allowed_prefixes },
+            zr005: Zr005Config { allowed_prefixes, pure_callees },
             zr006: Zr006Config { max_patches },
             zr008: Zr008Config { max_patches: zr008_max_patches },
         }
@@ -808,5 +854,33 @@ mod tests {
         .unwrap();
         let cfg = Config::discover(tmp.path()).unwrap();
         assert_eq!(cfg.rule_config().zr004.max_asserts, 7);
+    }
+
+    #[test]
+    fn rule_config_defaults_zr005_pure_callees_to_parse_only_names() {
+        let rc = Config::default().rule_config();
+        for name in ["urlparse", "urlsplit", "PurePath", "PurePosixPath", "PureWindowsPath"] {
+            assert!(rc.zr005.pure_callees.contains(name), "built-in pure callee {name} missing");
+        }
+        assert!(
+            !rc.zr005.pure_callees.contains("Path"),
+            "`Path` opens files after construction and must stay opt-in"
+        );
+    }
+
+    #[test]
+    fn rule_config_merges_extra_pure_callees_into_zr005() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("zorilla.toml"),
+            "[rules.ZR005]\nextra_pure_callees = [\"Path\", \"parse_locator\"]\n",
+        )
+        .unwrap();
+        let cfg = Config::discover(tmp.path()).unwrap();
+        let rc = cfg.rule_config();
+        assert!(rc.zr005.pure_callees.contains("Path"));
+        assert!(rc.zr005.pure_callees.contains("parse_locator"));
+        // Built-ins still there.
+        assert!(rc.zr005.pure_callees.contains("urlparse"));
     }
 }

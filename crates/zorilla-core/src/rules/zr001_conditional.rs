@@ -15,12 +15,22 @@
 //!
 //! ## Refinements
 //!
-//! Four patterns look like control flow to a naive walk but read as
+//! Six patterns look like control flow to a naive walk but read as
 //! linear test code in practice and are therefore exempted:
 //!
 //! - **`try` / `finally` without `except`** — pure cleanup, not
 //!   branching. Only `try` blocks that contain at least one
 //!   `except_clause` fire.
+//! - **`if` guarding cleanup inside `finally`** — `finally: if
+//!   path.exists(): path.unlink()` releases a resource conditionally;
+//!   it cannot skip the contract under test because the contract is
+//!   not in it. The `if` must be a direct statement of the `finally`
+//!   block and every branch (`if` / `elif` / `else`) may hold only call
+//!   statements (optionally `await`ed), assignments, `del` and `pass`:
+//!   no assert of any shape,
+//!   no `return` / `raise`, no nested control flow. A guarded assert
+//!   inside `finally` still fires, so `finally` is not a blind spot,
+//!   and the same `if` anywhere else in the test still fires.
 //! - **`for` over asserts (with optional intervening assignments,
 //!   comments, bare non-helper calls, and `with` wrappers)** — a
 //!   parametrize-by-loop pattern (`for case in cases: assert case.ok`,
@@ -139,7 +149,7 @@ impl Rule for ConditionalRule {
             // of the rule's posture — an assert inside an inline helper
             // does not invalidate the cleanup shape any more than control
             // flow inside that helper triggers the rule.
-            let test_body_has_asserts = outer_test_body_has_assert(body, ctx.source, helpers);
+            let test_body_has_asserts = pruned_subtree_has_assert(body, ctx.source, helpers);
             if let Some(offender) =
                 find_first_conditional(body, ctx.source, helpers, test_body_has_asserts)
             {
@@ -164,10 +174,13 @@ impl Rule for ConditionalRule {
 /// subtrees — the outer test's control flow is what the rule cares
 /// about; an inline helper's internal structure isn't.
 ///
-/// Four refinements rule out look-alikes:
+/// Five refinements rule out look-alikes:
 /// - `try_statement` only fires when it has at least one `except_clause`
 ///   ([`has_except_clause`]). A `try` / `finally` with no `except` is
 ///   cleanup, not branching.
+/// - `if_statement` is skipped when it is a cleanup guard inside a
+///   `finally` block ([`is_cleanup_guard_in_finally`]): every branch is
+///   side effects only, with no assert-shaped node anywhere inside.
 /// - `for_statement` is skipped when its body matches
 ///   [`for_body_is_parametrize_substitute`]: at least one
 ///   assert-bearing statement, with only plain assignments interleaved
@@ -179,9 +192,10 @@ impl Rule for ConditionalRule {
 ///   assignments inside a mis-named fixture-shaped test. Caller passes
 ///   `test_body_has_asserts` so this downgrade is disabled the moment
 ///   any assert appears in the enclosing test.
-/// - `if_statement`, `while_statement`, and `match_statement` always
-///   fire when found at the outer scope. (PEP 634 structural pattern
-///   matching is multi-branch flow by definition.)
+/// - `while_statement` and `match_statement` always fire when found at
+///   the outer scope, and so does `if_statement` outside the `finally`
+///   cleanup-guard case above. (PEP 634 structural pattern matching is
+///   multi-branch flow by definition.)
 fn find_first_conditional<'tree>(
     body: Node<'tree>,
     source: &str,
@@ -192,7 +206,14 @@ fn find_first_conditional<'tree>(
         body,
         |n| !matches!(n.kind(), "function_definition" | "lambda"),
         |node| match node.kind() {
-            "if_statement" | "while_statement" | "match_statement" => ControlFlow::Break(node),
+            "if_statement" => {
+                if is_cleanup_guard_in_finally(node, source, helpers) {
+                    ControlFlow::Continue(())
+                } else {
+                    ControlFlow::Break(node)
+                }
+            }
+            "while_statement" | "match_statement" => ControlFlow::Break(node),
             "try_statement" => {
                 if has_except_clause(node) {
                     ControlFlow::Break(node)
@@ -225,13 +246,15 @@ fn find_first_conditional<'tree>(
 
 /// Like [`crate::ast::has_any_assert`] but pruned: nested
 /// `function_definition` and `lambda` subtrees are skipped during the
-/// walk. Used by the cleanup-loop downgrade so an assert *inside an
-/// inline helper* doesn't count as the test asserting anything —
-/// consistent with `find_first_conditional`, which already treats those
-/// subtrees as opaque.
-fn outer_test_body_has_assert(body: Node<'_>, source: &str, helpers: &HashSet<String>) -> bool {
+/// walk. Works on any node. Used on the test body by the cleanup-loop
+/// downgrade, so an assert *inside an inline helper* doesn't count as
+/// the test asserting anything, and on a single `if` by
+/// [`is_cleanup_guard_in_finally`], so no assert of any shape hides
+/// under a cleanup guard — consistent with `find_first_conditional`,
+/// which already treats those subtrees as opaque.
+fn pruned_subtree_has_assert(root: Node<'_>, source: &str, helpers: &HashSet<String>) -> bool {
     walk_descendants_pruned(
-        body,
+        root,
         |n| !matches!(n.kind(), "function_definition" | "lambda"),
         |node| {
             if is_assert_shaped(node, source, helpers) {
@@ -266,6 +289,93 @@ fn is_assert_shaped(node: Node<'_>, source: &str, helpers: &HashSet<String>) -> 
 /// helper set doesn't enumerate explicitly.
 fn is_helper_prefix(name: &str) -> bool {
     name.starts_with("assert_") || name.starts_with("_assert_")
+}
+
+/// Is `if_node` an `if_statement` that only guards teardown inside a
+/// `finally` block?
+///
+/// Issue #24: `finally: if path.exists(): path.unlink()` earns the same
+/// finding as `if points: assert ordered(points)`, yet only the latter
+/// can skip the contract under test. The boundary is drawn so that the
+/// exemption never hides an assertion:
+///
+/// - the `if` is a **direct statement of a `finally` block** — the same
+///   shape in the `try` body or the test body proper still fires;
+/// - **no assert-shaped node** (bare `assert`, helper call,
+///   `with pytest.raises`) appears anywhere under the `if` — condition,
+///   branches, assignment right-hand sides, at any depth — so an
+///   assertion inside `finally` is never a blind spot;
+/// - **every branch** (`if`, each `elif`, `else`) contains only call
+///   statements (optionally `await`ed), assignments, `del` and `pass` —
+///   see [`block_is_side_effect_only`] — so a `return`, a `raise`, a
+///   nested loop or branch disqualifies it.
+fn is_cleanup_guard_in_finally(if_node: Node<'_>, source: &str, helpers: &HashSet<String>) -> bool {
+    let Some(block) = if_node.parent() else {
+        return false;
+    };
+    if block.kind() != "block" {
+        return false;
+    }
+    if !block.parent().is_some_and(|clause| clause.kind() == "finally_clause") {
+        return false;
+    }
+    if pruned_subtree_has_assert(if_node, source, helpers) {
+        return false;
+    }
+    let Some(consequence) = if_node.child_by_field_name("consequence") else {
+        return false;
+    };
+    if !block_is_side_effect_only(consequence) {
+        return false;
+    }
+    let mut cursor = if_node.walk();
+    // `let all_ok = …; all_ok` — see `has_except_clause` for why the
+    // iterator must not be the tail expression.
+    let all_ok = if_node
+        .named_children(&mut cursor)
+        .filter(|child| matches!(child.kind(), "elif_clause" | "else_clause"))
+        .all(|branch| {
+            // `elif_clause` exposes its block as `consequence`,
+            // `else_clause` as `body`.
+            branch
+                .child_by_field_name("consequence")
+                .or_else(|| branch.child_by_field_name("body"))
+                .is_some_and(block_is_side_effect_only)
+        });
+    all_ok
+}
+
+/// Does `block` hold only side-effect statements — call statements
+/// (optionally `await`ed), assignments, `del`, `pass` and comments — and
+/// at least one real statement among them? Anything that transfers
+/// control or branches disqualifies the block.
+///
+/// Asserts are not inspected here: the caller has already rejected the
+/// whole `if` when [`pruned_subtree_has_assert`] finds one anywhere
+/// under it, which also covers shapes this statement-level check cannot
+/// see, such as `x = self.assertEqual(a, b)`.
+fn block_is_side_effect_only(block: Node<'_>) -> bool {
+    let mut cursor = block.walk();
+    let mut saw_statement = false;
+    let all_side_effects = block.named_children(&mut cursor).all(|child| match child.kind() {
+        "expression_statement" => {
+            saw_statement = true;
+            let Some(inner) = child.named_child(0) else {
+                return false;
+            };
+            let effect = if inner.kind() == "await" { inner.named_child(0) } else { Some(inner) };
+            effect.is_some_and(|effect| {
+                matches!(effect.kind(), "call" | "assignment" | "augmented_assignment")
+            })
+        }
+        "delete_statement" | "pass_statement" => {
+            saw_statement = true;
+            true
+        }
+        "comment" => true,
+        _ => false,
+    });
+    all_side_effects && saw_statement
 }
 
 /// Does `try_node` (a `try_statement`) carry at least one
@@ -545,9 +655,9 @@ fn classify_with_statement(
 
 /// Does `with_node` carry a `with_item` whose value is a call to an
 /// assertion-shaped context manager — `assertRaises`, `assertWarns`,
-/// `assertRaisesRegex`, `assertWarnsRegex`, or `pytest.raises` /
+/// `assertRaisesRegex`, `assertWarnsRegex`, `pytest.raises` /
 /// `pytest.warns` (matched on the trailing identifier `raises` /
-/// `warns`)?
+/// `warns`), or the `does_not_raise` no-exception contract?
 ///
 /// Used by [`classify_with_statement`] to treat such `with` blocks as
 /// a single assertion for the for-of-asserts downgrade — the context
@@ -571,14 +681,14 @@ fn with_item_is_assertion_context_manager(with_node: Node<'_>, source: &str) -> 
                 let mut inner_cursor = clause.walk();
                 for item in clause.named_children(&mut inner_cursor) {
                     if item.kind() == "with_item"
-                        && with_item_value_is_raises_or_warns(item, source)
+                        && with_item_value_is_assertion_context(item, source)
                     {
                         return true;
                     }
                 }
             }
             "with_item" => {
-                if with_item_value_is_raises_or_warns(clause, source) {
+                if with_item_value_is_assertion_context(clause, source) {
                     return true;
                 }
             }
@@ -592,7 +702,7 @@ fn with_item_is_assertion_context_manager(with_node: Node<'_>, source: &str) -> 
 
 /// Does `with_item`'s value (the expression after `with` / `as`) call
 /// one of the assertion-shaped context-manager names?
-fn with_item_value_is_raises_or_warns(with_item: Node<'_>, source: &str) -> bool {
+fn with_item_value_is_assertion_context(with_item: Node<'_>, source: &str) -> bool {
     let value = with_item.child_by_field_name("value").unwrap_or_else(|| {
         // Some grammar revisions expose the call directly as the first
         // (and only) named child of `with_item` rather than via a
@@ -613,6 +723,7 @@ fn with_item_value_is_raises_or_warns(with_item: Node<'_>, source: &str) -> bool
             | "assertWarnsRegex"
             | "raises"
             | "warns"
+            | "does_not_raise"
     )
 }
 
@@ -1286,5 +1397,168 @@ def test_does_real_work():
         let out = run(src);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].line, 3);
+    }
+
+    #[test]
+    fn does_not_fire_on_cleanup_guard_in_finally() {
+        // Issue #24: an `if` in `finally` whose body only releases a
+        // resource is teardown, not a branch that can skip the contract.
+        let src = "\
+def test_cleanup(tmp_path):
+    path = tmp_path / \"temporary.txt\"
+    try:
+        path.write_text(\"ok\")
+        assert path.read_text() == \"ok\"
+    finally:
+        if path.exists():
+            path.unlink()
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_cleanup_guard_with_else_in_finally() {
+        // Both branches are side-effect only: still teardown.
+        let src = "\
+def test_cleanup(conn):
+    try:
+        assert conn.ping()
+    finally:
+        if conn.is_open():
+            conn.close()
+        elif conn.pending:
+            conn.abort()
+        else:
+            conn.reset()
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_assert_guarded_by_if_in_finally() {
+        // Assertions inside `finally` must not become a blind spot: a
+        // guarded assert is a conditionally skipped assertion.
+        let src = "\
+def test_cleanup(path):
+    try:
+        run(path)
+    finally:
+        if path.exists():
+            assert path.read_text() == \"ok\"
+            path.unlink()
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].code, "ZR001");
+        assert_eq!(out[0].line, 5);
+        assert_eq!(out[0].column, 9);
+    }
+
+    #[test]
+    fn fires_on_helper_assert_guarded_by_if_in_finally() {
+        let src = "\
+class TestCleanup:
+    def test_cleanup(self):
+        try:
+            run()
+        finally:
+            if self.path.exists():
+                self.assertTrue(self.path.is_file())
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].line, 6);
+    }
+
+    #[test]
+    fn fires_on_if_in_finally_with_nested_control_flow() {
+        let src = "\
+def test_cleanup(handles):
+    try:
+        assert handles
+    finally:
+        if handles:
+            for h in handles:
+                h.close()
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].line, 5);
+    }
+
+    #[test]
+    fn fires_on_if_in_finally_with_return() {
+        let src = "\
+def test_cleanup(path):
+    try:
+        assert path
+    finally:
+        if path.exists():
+            return
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].line, 5);
+    }
+
+    #[test]
+    fn fires_on_cleanup_shaped_if_outside_finally() {
+        // The same `if` in the test body proper is a branch: the shape is
+        // exempt only where it is teardown, i.e. in `finally`.
+        let src = "\
+def test_cleanup(path):
+    path.write_text(\"ok\")
+    assert path.read_text() == \"ok\"
+    if path.exists():
+        path.unlink()
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].line, 4);
+    }
+
+    #[test]
+    fn fires_on_cleanup_shaped_if_in_try_body() {
+        let src = "\
+def test_cleanup(path):
+    try:
+        if path.exists():
+            path.unlink()
+        assert not path.exists()
+    finally:
+        path.parent.rmdir()
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].line, 3);
+    }
+
+    #[test]
+    fn fires_on_if_guarding_the_contract_over_optional_data() {
+        // The signal the refinement must keep: a test that passes when its
+        // input is empty because the assertions sit under `if points:`.
+        let src = "\
+def test_sparkline_ordering(points):
+    if points:
+        assert points == sorted(points)
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].line, 2);
+    }
+
+    #[test]
+    fn does_not_fire_on_for_loop_with_does_not_raise_wrapper() {
+        // `with does_not_raise():` is the pytest-documented no-exception
+        // contract; a loop of those is a parametrize-substitute.
+        let src = "\
+from contextlib import nullcontext as does_not_raise
+
+def test_parses_every_case():
+    for case in CASES:
+        with does_not_raise():
+            parse(case)
+";
+        assert!(run(src).is_empty());
     }
 }

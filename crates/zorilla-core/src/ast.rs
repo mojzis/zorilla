@@ -209,8 +209,10 @@ pub enum AssertHit<'tree> {
     /// helper set (e.g. `self.assertEqual(...)`, `fail()`).
     HelperCall(Node<'tree>),
     /// A `with_statement` whose `with_item` value is a call to something
-    /// ending in `raises` or `warns` — `pytest.raises(...)`,
-    /// `pytest.warns(...)`, `self.assertRaises(...)` etc.
+    /// ending in `raises`, `warns` or `does_not_raise` —
+    /// `pytest.raises(...)`, `pytest.warns(...)`, `self.assertRaises(...)`,
+    /// or the pytest-documented `with does_not_raise():` no-exception
+    /// contract (`from contextlib import nullcontext as does_not_raise`).
     RaisesContext(Node<'tree>),
 }
 
@@ -306,7 +308,7 @@ fn classify_assert_hit<'tree>(
             let name = call_final_name(node, source)?;
             is_assertion_helper_name(name, helpers).then_some(AssertHit::HelperCall(node))
         }
-        "with_statement" => with_statement_is_raises_or_warns(node, source)
+        "with_statement" => with_statement_is_assertion_context(node, source)
             .then_some(AssertHit::RaisesContext(node)),
         _ => None,
     }
@@ -672,8 +674,13 @@ fn call_is_runtime_skip(call_node: Node<'_>, source: &str) -> bool {
 }
 
 /// Does `with_node` carry a `with_item` whose value is a call whose
-/// function's final name is `raises` or `warns`?
-fn with_statement_is_raises_or_warns(with_node: Node<'_>, source: &str) -> bool {
+/// function's final name is `raises`, `warns` or `does_not_raise`?
+///
+/// `does_not_raise` is the alias the pytest documentation gives
+/// `contextlib.nullcontext` to state that the block must *not* raise. The
+/// alias is what makes the contract explicit: a bare `nullcontext()` says
+/// nothing and is deliberately not matched.
+fn with_statement_is_assertion_context(with_node: Node<'_>, source: &str) -> bool {
     // `with_statement` -> `with_clause` -> one or more `with_item`s.
     // The value expression sits under `with_item` as either a named
     // `value` field (newer grammar) or as the sole named child
@@ -687,7 +694,7 @@ fn with_statement_is_raises_or_warns(with_node: Node<'_>, source: &str) -> bool 
             let _ = walk_descendants::<()>(n, |inner| {
                 if inner.kind() == "call" {
                     if let Some(name) = call_final_name(inner, source) {
-                        if name == "raises" || name == "warns" {
+                        if matches!(name, "raises" | "warns" | "does_not_raise") {
                             found = true;
                             return ControlFlow::Break(());
                         }

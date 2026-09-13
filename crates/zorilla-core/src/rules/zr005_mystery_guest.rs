@@ -21,6 +21,23 @@
 //! `string` nodes fire. Strings used as an `assert x, "msg"` message are
 //! explicitly skipped to avoid flagging failure explanations.
 //!
+//! Two shapes of literal are test data rather than resources and never
+//! fire, whatever surrounds them:
+//!
+//! - a URL whose host ends in a reserved, non-resolvable top-level domain
+//!   — `.invalid`, `.test` or `.example` (RFC 2606 / RFC 6761). Nothing
+//!   can be fetched from `https://example.invalid/x`, so the literal is
+//!   synthetic by definition. `example.com` is *not* in this set: it
+//!   resolves, so fetching it is a real network dependency;
+//! - the **direct positional argument of a parse-only call** — a call
+//!   whose final identifier is in [`crate::config::DEFAULT_ZR005_PURE_CALLEES`]
+//!   (`urlparse`, `PurePosixPath`, …) or in the project's
+//!   `[tool.zorilla.rules.ZR005] extra_pure_callees`. Such a callee
+//!   cannot open or fetch its argument. `Path` is not a built-in entry
+//!   because `Path("/etc/x").read_text()` is the canonical mystery
+//!   guest; a suite that uses absolute paths as parser input adds it
+//!   locally and accepts that trade.
+//!
 //! Users can silence specific literals via
 //! `[tool.zorilla.rules.ZR005] allowed_prefixes = [...]`: any literal
 //! whose content starts with a listed prefix is not flagged.
@@ -112,12 +129,14 @@
 //!     assert cfg
 //! ```
 
+use std::collections::HashSet;
 use std::ops::ControlFlow;
 
 use tree_sitter::Node;
 
 use crate::ast::{
-    climb_past_parens, decorator_chain_segments, iter_test_functions, walk_descendants,
+    call_final_name, climb_past_parens, decorator_chain_segments, iter_test_functions,
+    walk_descendants,
 };
 use crate::report::{Finding, Severity};
 use crate::rules::{Context, Rule};
@@ -163,6 +182,14 @@ const HTTP_METHODS: &[&str] =
 /// a config key for extensibility — that is out of scope here).
 const URL_KWARG_NAMES: &[&str] = &["url", "endpoint", "href", "link", "path", "id", "name"];
 
+/// Top-level domains that can never resolve: reserved by RFC 2606 §2 and
+/// RFC 6761 for testing, documentation and invalid names. A URL whose host
+/// ends in one of these is synthetic by definition. `example.com` /
+/// `.net` / `.org` are reserved too but *do* resolve, so they are not
+/// listed: a test that fetches them has a real network dependency, and
+/// neither is `.localhost`, which RFC 6761 defines to resolve to loopback.
+const RESERVED_TLDS: &[&str] = &[".invalid", ".test", ".example"];
+
 /// The registered ZR005 rule instance.
 pub static ZR005_MYSTERY_GUEST: MysteryGuestRule = MysteryGuestRule;
 
@@ -184,6 +211,7 @@ impl Rule for MysteryGuestRule {
 
     fn check(&self, ctx: &Context<'_>, out: &mut Vec<Finding>) {
         let allowed = &ctx.config.zr005.allowed_prefixes;
+        let pure_callees = &ctx.config.zr005.pure_callees;
         for test_fn in iter_test_functions(ctx.tree, ctx.source) {
             let Some(body) = test_fn.child_by_field_name("body") else {
                 continue;
@@ -198,6 +226,7 @@ impl Rule for MysteryGuestRule {
                     && !is_in_pytest_fixture_function(node, ctx.source)
                     && !is_in_url_kwarg(node, ctx.source)
                     && !is_in_url_dict_pair(node, ctx.source)
+                    && !is_pure_callee_argument(node, ctx.source, pure_callees)
                 {
                     if let Some(literal) = string_content(node, ctx.source) {
                         if is_mystery_guest(literal)
@@ -404,8 +433,9 @@ fn is_mystery_guest(literal: &str) -> bool {
     if literal.starts_with('/') {
         return true;
     }
-    if literal.starts_with("http://") || literal.starts_with("https://") {
-        return true;
+    if let Some(rest) = literal.strip_prefix("http://").or_else(|| literal.strip_prefix("https://"))
+    {
+        return !has_reserved_tld(rest);
     }
     if literal.starts_with("~/") || literal.starts_with("~\\") {
         return true;
@@ -414,6 +444,52 @@ fn is_mystery_guest(literal: &str) -> bool {
         return true;
     }
     false
+}
+
+/// Does the host of `after_scheme` (a URL with its `http://` / `https://`
+/// already stripped) end in one of [`RESERVED_TLDS`]?
+///
+/// The host is the authority up to the first `/`, `?` or `#`, minus any
+/// `user:pass@` prefix, any `:port` suffix and a trailing `.` (the
+/// fully-qualified spelling), compared case-insensitively. The reserved
+/// name has to be the *last* label: `invalid.example.com` is a real host,
+/// and so is a bare `invalid`.
+fn has_reserved_tld(after_scheme: &str) -> bool {
+    let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit('@').next().unwrap_or("");
+    let host = host_port.split(':').next().unwrap_or("");
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    RESERVED_TLDS.iter().any(|tld| host.ends_with(tld))
+}
+
+/// Is `string_node` a **direct positional argument** of a call whose
+/// final identifier is in `pure_callees` — `urlparse("https://…")`,
+/// `PurePosixPath("/…")`, or a project-listed parser?
+///
+/// Such a callee only parses or formats its argument and cannot open or
+/// fetch it, so the literal is parser input. Only a direct argument
+/// qualifies: `urlparse(fetch("https://…"))` is whatever `fetch` does, and
+/// `urlparse(open("/x").read())` still opens `/x`. Keyword arguments are
+/// not matched here; `url=` / `path=` already have their own carve-out.
+fn is_pure_callee_argument(
+    string_node: Node<'_>,
+    source: &str,
+    pure_callees: &HashSet<String>,
+) -> bool {
+    let current = climb_past_parens(string_node);
+    let Some(arg_list) = current.parent() else {
+        return false;
+    };
+    if arg_list.kind() != "argument_list" {
+        return false;
+    }
+    let Some(call) = arg_list.parent() else {
+        return false;
+    };
+    if call.kind() != "call" {
+        return false;
+    }
+    call_final_name(call, source).is_some_and(|name| pure_callees.contains(name))
 }
 
 /// `^[A-Za-z]:\\` — a Windows absolute path like `C:\Users\alice`.
@@ -1199,7 +1275,7 @@ def test_requests():
         // TestClient skip only applies to the first positional argument.
         let src = "\
 def test_with_headers():
-    resp = client.get(\"/healthz\", headers={\"x\": \"https://leak.example/\"})
+    resp = client.get(\"/healthz\", headers={\"x\": \"https://leak.example.com/\"})
     assert resp.ok
 ";
         let out = run(src);
@@ -1207,7 +1283,7 @@ def test_with_headers():
         // the dict is a string nested inside a `dictionary` literal — it
         // is NOT the first positional argument of the `.get` call.
         assert_eq!(out.len(), 1);
-        assert!(out[0].message.contains("https://leak.example/"));
+        assert!(out[0].message.contains("https://leak.example.com/"));
     }
 
     #[test]
@@ -1533,12 +1609,12 @@ def test_uses_url_inline():
         // Guard: a non-listed kwarg name (`data`) does not trigger 1c.
         let src = "\
 def test_uses_data_kwarg():
-    result = make_thing(data=\"https://leak.example/\")
+    result = make_thing(data=\"https://leak.example.com/\")
     assert result
 ";
         let out = run(src);
         assert_eq!(out.len(), 1);
-        assert!(out[0].message.contains("https://leak.example/"));
+        assert!(out[0].message.contains("https://leak.example.com/"));
     }
 
     #[test]
@@ -1598,12 +1674,12 @@ def test_builds_repo():
         // 1c negative: `data` is not in URL_KWARG_NAMES, so the literal fires.
         let src = "\
 def test_makes_thing():
-    result = make_thing(data=\"https://leak.example/\")
+    result = make_thing(data=\"https://leak.example.com/\")
     assert result
 ";
         let out = run(src);
         assert_eq!(out.len(), 1);
-        assert!(out[0].message.contains("https://leak.example/"));
+        assert!(out[0].message.contains("https://leak.example.com/"));
     }
 
     #[test]
@@ -1636,12 +1712,12 @@ def test_cfg():
         // 1d negative: `"data"` is not in URL_KWARG_NAMES, so the URL fires.
         let src = "\
 def test_data_dict():
-    d = {\"data\": \"https://leak.example/\"}
+    d = {\"data\": \"https://leak.example.com/\"}
     assert d
 ";
         let out = run(src);
         assert_eq!(out.len(), 1);
-        assert!(out[0].message.contains("https://leak.example/"));
+        assert!(out[0].message.contains("https://leak.example.com/"));
     }
 
     #[test]
@@ -1650,12 +1726,12 @@ def test_data_dict():
         // (an identifier like `KEY`) does NOT trigger the carve-out.
         let src = "\
 def test_var_key():
-    d = {KEY: \"https://leak.example/\"}
+    d = {KEY: \"https://leak.example.com/\"}
     assert d
 ";
         let out = run(src);
         assert_eq!(out.len(), 1);
-        assert!(out[0].message.contains("https://leak.example/"));
+        assert!(out[0].message.contains("https://leak.example.com/"));
     }
 
     // --- Equality-assert carve-out ---
@@ -1784,6 +1860,145 @@ def test_reads_then_compares():
 def test_compares_outside_assert():
     same = url == \"https://x\"
     assert same
+";
+        assert_eq!(run(src).len(), 1);
+    }
+
+    #[test]
+    fn does_not_fire_on_url_with_reserved_non_resolvable_tld() {
+        // Issue #22: `.invalid`, `.test` and `.example` can never resolve
+        // (RFC 2606 / RFC 6761), so such a URL is synthetic by definition.
+        let src = "\
+def test_urls():
+    a = get(\"https://example.invalid/project\")
+    b = get(\"http://api.test/v1\")
+    c = get(\"https://user@host.example:8443/x?y#z\")
+    assert a and b and c
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn has_reserved_tld_strips_authority_decorations() {
+        for (input, expected) in [
+            ("example.invalid/x", true),
+            ("Example.INVALID", true),
+            ("api.test?x=1", true),
+            ("api.test#frag", true),
+            ("u:p@host.example:8443/x", true),
+            ("example.invalid./x", true),
+            ("invalid.example.com/x", false),
+            ("example.com", false),
+            ("invalid", false),
+            ("localhost:8000/x", false),
+            ("", false),
+        ] {
+            assert_eq!(has_reserved_tld(input), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn fires_on_url_whose_host_only_contains_a_reserved_label() {
+        // The reserved name has to be the TLD: `invalid.example.com` is
+        // a real, resolvable host.
+        let src = "\
+def test_fetch():
+    r = get(\"https://invalid.example.com/x\")
+    assert r
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].line, 2);
+    }
+
+    #[test]
+    fn fires_on_example_com_url() {
+        // RFC 2606 reserves example.com for documentation but it resolves,
+        // so fetching it is a real network dependency.
+        let src = "\
+def test_fetch():
+    r = get(\"https://example.com/x\")
+    assert r
+";
+        assert_eq!(run(src).len(), 1);
+    }
+
+    #[test]
+    fn does_not_fire_on_argument_of_pure_parser() {
+        // `urlparse` / `PurePosixPath` only parse their argument; they
+        // cannot open or fetch it, so the literal is parser input.
+        let src = "\
+from pathlib import PurePosixPath
+from urllib.parse import urlparse
+
+def test_url_parser():
+    result = urlparse(\"https://api.example.com/project\")
+    assert result.path == \"/project\"
+
+def test_pure_path():
+    path = PurePosixPath(\"/fictional/input.txt\")
+    assert path.name == \"input.txt\"
+
+def test_qualified_parser():
+    parts = urllib.parse.urlsplit(\"https://api.example.com/x\")
+    assert parts.netloc
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_path_constructor_by_default() {
+        // `Path(...)` is not in the built-in pure set: `Path("/etc/x")`
+        // is usually followed by `.read_text()`. Projects that use
+        // absolute paths as parser input opt in via `extra_pure_callees`.
+        let src = "\
+from pathlib import Path
+
+def test_literal_error_context():
+    path = Path(\"/fictional/input.txt\")
+    assert str(path) == \"/fictional/input.txt\"
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].line, 4);
+        assert_eq!(out[0].column, 17);
+    }
+
+    #[test]
+    fn extra_pure_callees_silences_listed_constructor() {
+        let src = "\
+from pathlib import Path
+
+def test_literal_error_context():
+    path = Path(\"/fictional/input.txt\")
+    assert str(path) == \"/fictional/input.txt\"
+";
+        let mut cfg = Config::default().rule_config();
+        cfg.zr005.pure_callees.insert("Path".to_string());
+        assert!(run_with(src, &cfg).is_empty());
+    }
+
+    #[test]
+    fn fires_on_literal_nested_inside_pure_callee_argument() {
+        // Only a direct argument is parser input; a literal reached
+        // through another call is whatever that call does with it.
+        let src = "\
+def test_url_parser():
+    result = urlparse(fetch(\"https://api.example.com/project\"))
+    assert result.path
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].line, 2);
+    }
+
+    #[test]
+    fn fires_on_method_call_on_pure_parser_result() {
+        // `open("/x")` is not a parser, whatever surrounds it.
+        let src = "\
+def test_read():
+    data = urlparse(open(\"/etc/hosts\").read())
+    assert data
 ";
         assert_eq!(run(src).len(), 1);
     }

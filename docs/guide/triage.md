@@ -13,8 +13,10 @@ holding; the order is roughly cheapest fix first.
    delete it. An empty test is a false green, not a placeholder.
 2. ZR003 no-assertion: add the assertion the test is missing. If the call under
    test *is* the assertion because it raises on failure, say so with
-   `pytest.raises`; if it is a project-local assertion helper, register its name
-   in `ZR003.extra_helpers` rather than editing the test.
+   `pytest.raises`; if not raising is the whole contract, say that with
+   `with does_not_raise():` (`from contextlib import nullcontext as
+   does_not_raise`), never `assert True`; if it is a project-local assertion
+   helper, register its name in `ZR003.extra_helpers` rather than editing the test.
 3. ZR002 sleep-in-test: wait on the condition the test is actually waiting for,
    or inject a fake clock. A sleep is flake, wasted wall-clock, or both.
 4. ZR001 conditional-test-logic: a branch means the test does not know what it
@@ -28,7 +30,8 @@ holding; the order is roughly cheapest fix first.
    fixture.
 7. ZR005 mystery-guest: replace the path or URL with `tmp_path`, a fixture, or a
    local double. If the literal is genuinely local and safe, add its prefix to
-   `ZR005.allowed_prefixes`.
+   `ZR005.allowed_prefixes`; if it only ever feeds a parser the tool does not
+   know, name that parser in `ZR005.extra_pure_callees`.
 8. The smell is deliberate, and only then: suppress it with
    `# zorilla: ignore[ZR001] -- <reason>` on the offending line. The reason is
    required, and the bracketed code keeps the suppression narrow.
