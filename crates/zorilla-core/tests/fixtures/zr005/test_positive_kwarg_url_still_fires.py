@@ -1,3 +1,3 @@
 def test_with_headers():
-    resp = client.get("/healthz", headers={"x": "https://leak.example/"})
+    resp = client.get("/healthz", headers={"x": "https://leak.example.com/"})
     assert resp.ok

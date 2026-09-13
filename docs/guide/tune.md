@@ -12,10 +12,9 @@ is your reason and is ignored by the parser, so always write one.
   that line. Prefer it; a bare `ignore` also hides the next rule to fire there.
 - `# zorilla: ignore-file -- <reason>` drops everything in the file, from
   anywhere in it. `# zorilla: ignore-file[ZR005]` narrows it to the listed codes.
-- Codes are case-insensitive. An unrecognised directive is silently an ordinary
-  comment, so check it against `zorilla list-rules`.
-- The parser locks onto the first `#` on a line without reasoning about string
-  literals, so `# zorilla: ignore` inside a docstring is read as a directive.
+- Codes are case-insensitive. An unrecognised directive is an ordinary comment,
+  so check it against `zorilla list-rules`. The parser locks onto the first `#`
+  on a line, so `# zorilla: ignore` inside a docstring is read as a directive.
 
 **Scope.** `include` and `exclude` decide which files are read at all. Both
 *replace* the defaults rather than extending them, so list every pattern you
@@ -36,6 +35,7 @@ exclude = ["**/fixtures/**"]
 | `ZR003.extra_helpers` | `[]` | a project-local assertion helper reads as no assertion |
 | `ZR004.max_asserts` | `4` | bare asserts are conventional here and drown real findings |
 | `ZR005.allowed_prefixes` | `[]` | a literal path or URL is genuinely local and safe |
+| `ZR005.extra_pure_callees` | `[]` | a project-local parser never opens the literal it gets |
 | `ZR006.max_patches` | `3` | stacked `@patch` decorators are irreducible in this suite |
 | `ZR008.max_patches` | `3` | the same, for `with patch(...)` context managers |
 

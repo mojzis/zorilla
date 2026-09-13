@@ -22,7 +22,13 @@
 //!   `self.assertRaises(...)`, and any custom `foo.raises(...)` all
 //!   count). The final-identifier match is deliberately permissive: it
 //!   mirrors how assertion-helper matching works and keeps user-defined
-//!   exception testers from producing false positives.
+//!   exception testers from producing false positives;
+//! - a `with does_not_raise():` context manager — the pytest-documented
+//!   alias for `contextlib.nullcontext` that states a no-exception
+//!   contract explicitly. `nullcontext` propagates exceptions, so the
+//!   test still fails when the operation raises. A bare
+//!   `with nullcontext():` states nothing and does not count: intent is
+//!   never guessed from a name or a comment.
 //!
 //! The walk descends into nested inline helpers — if the test calls a
 //! nested `def` that contains an assert, the test counts as asserting.
@@ -438,5 +444,66 @@ def test_no_assert_skip_not_first():
         let out = run(src);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].code, "ZR003");
+    }
+
+    #[test]
+    fn does_not_fire_on_does_not_raise_context_manager() {
+        // Issue #25: the pytest-documented idiom for a deliberate
+        // no-exception contract. `nullcontext` lets an exception
+        // propagate, so the test still fails when the operation raises.
+        let src = "\
+from contextlib import nullcontext as does_not_raise
+
+def test_closing_an_already_closed_stream_is_safe():
+    import io
+    stream = io.StringIO()
+    stream.close()
+    with does_not_raise():
+        stream.close()
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_fire_on_qualified_does_not_raise_context_manager() {
+        let src = "\
+def test_safe():
+    with helpers.does_not_raise():
+        op()
+";
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn fires_on_bare_nullcontext_context_manager() {
+        // `with nullcontext():` states no contract; only the aliased name
+        // is an explicit declaration. Intent is not guessed.
+        let src = "\
+from contextlib import nullcontext
+
+def test_safe():
+    with nullcontext():
+        op()
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].code, "ZR003");
+        assert_eq!(out[0].line, 3);
+    }
+
+    #[test]
+    fn fires_on_no_exception_test_without_the_idiom() {
+        // The issue's reproduction, unchanged: still a finding, because
+        // nothing in the test says "not raising is the contract".
+        let src = "\
+def test_closing_an_already_closed_stream_is_safe():
+    import io
+    stream = io.StringIO()
+    stream.close()
+    stream.close()
+";
+        let out = run(src);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].line, 1);
     }
 }

@@ -287,8 +287,8 @@ max_patches = 3
 Per-rule sections (`[tool.zorilla.rules.ZRNNN]`) accept `enabled = false`
 to disable the rule and any rule-specific knobs (`max_asserts` for
 ZR004, `max_patches` for ZR006, `extra_helpers` for ZR003,
-`allowed_prefixes` for ZR005). See [`docs/rules/`](./docs/rules/) for
-the exhaustive list.
+`allowed_prefixes` and `extra_pure_callees` for ZR005). See
+[`docs/rules/`](./docs/rules/) for the exhaustive list.
 
 `zorilla guide tune` prints the whole reference — knobs, scope globs,
 suppression syntax and precedence — without leaving the terminal.
