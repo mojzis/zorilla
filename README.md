@@ -45,7 +45,7 @@ Exit codes: `0` clean, `1` findings reported, `2` error.
 | ZR001  | conditional-test-logic  | `if` / `for` / `while` / `try` in a test body            |
 | ZR002  | sleep-in-test           | `time.sleep` / `asyncio.sleep` inside a test             |
 | ZR003  | no-assertion            | Test function with no assertion or `pytest.raises`       |
-| ZR004  | assertion-roulette      | Too many bare (message-less) asserts in one test         |
+| ZR004  | assertion-roulette      | Too many bare asserts about more than one subject        |
 | ZR005  | mystery-guest           | Absolute path, URL, or `~`-path literal inside a test    |
 | ZR006  | patch-stack             | Too many stacked `@patch` / `@mock.patch` decorators     |
 | ZR007  | empty-test              | Test body is empty (`pass`, `...`, docstring-only)       |
@@ -293,13 +293,20 @@ ZR004, `max_patches` for ZR006, `extra_helpers` for ZR003,
 `zorilla guide tune` prints the whole reference — knobs, scope globs,
 suppression syntax and precedence — without leaving the terminal.
 
-Suppression comments work per-line and per-file:
+Suppression comments work per-line and per-file. A line directive covers
+the line it is on and, inside a bracketed multi-line statement, every
+line of that statement — so the comment `ruff format` or `black` moves to
+the closing bracket still counts. `zorilla explain ZR###` says which line
+each rule reports on.
 
 ```python
 # zorilla: ignore-file                              <- silences the whole file
 def test_x():
     if cond:  # zorilla: ignore[ZR001]              <- silences just this line
         ...
+    response = client.fetch(
+        "https://api.example.com/v1/things", timeout=5, retries=3
+    )  # zorilla: ignore[ZR005] -- local double     <- covers the whole call
 ```
 
 ## Developing

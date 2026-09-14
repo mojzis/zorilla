@@ -114,7 +114,7 @@ fn lint_one_file(
     let Ok(tree) = parse::parse(&source) else {
         return Vec::new();
     };
-    let suppressions = Suppressions::from_source(&source);
+    let suppressions = Suppressions::from_tree(&tree, &source);
 
     let ctx = Context {
         file,

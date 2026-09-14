@@ -77,7 +77,7 @@ fn run_single_rule(rule: &dyn Rule, path: &Path) -> Vec<Finding> {
 fn run_all_rules_with_suppressions(path: &Path) -> Vec<Finding> {
     let source = std::fs::read_to_string(path).expect("fixture read");
     let tree = parse(&source).expect("fixture parse");
-    let suppressions = Suppressions::from_source(&source);
+    let suppressions = Suppressions::from_tree(&tree, &source);
     let config = RuleConfig::default();
     let ctx = Context {
         file: path,

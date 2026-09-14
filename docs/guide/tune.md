@@ -6,8 +6,10 @@ changing one changes what zorilla reports everywhere, so change it deliberately.
 **Suppression.** Directives are `# zorilla:` comments. Text after the directive
 is your reason and is ignored by the parser, so always write one.
 
-- `# zorilla: ignore -- <reason>` drops every finding **on that same line**.
-  Strictly that line: a directive above a statement does not reach it.
+- `# zorilla: ignore -- <reason>` drops every finding **on that same line**. A
+  comment inside a bracketed multi-line statement covers every line of that
+  statement, so the directive `ruff format` moves to a `)` line still holds.
+  A directive on the line above a statement does not reach it.
 - `# zorilla: ignore[ZR001, ZR003] -- <reason>` drops only the listed codes on
   that line. Prefer it; a bare `ignore` also hides the next rule to fire there.
 - `# zorilla: ignore-file -- <reason>` drops everything in the file, from
@@ -33,7 +35,7 @@ exclude = ["**/fixtures/**"]
 | Key | Default | Change it when |
 |---|---|---|
 | `ZR003.extra_helpers` | `[]` | a project-local assertion helper reads as no assertion |
-| `ZR004.max_asserts` | `4` | bare asserts are conventional here and drown real findings |
+| `ZR004.max_asserts` | `4` | multi-subject asserts are the convention here and drown the rest |
 | `ZR005.allowed_prefixes` | `[]` | a literal path or URL is genuinely local and safe |
 | `ZR005.extra_pure_callees` | `[]` | a project-local parser never opens the literal it gets |
 | `ZR006.max_patches` | `3` | stacked `@patch` decorators are irreducible in this suite |
@@ -42,9 +44,6 @@ exclude = ["**/fixtures/**"]
 ```toml
 [tool.zorilla.rules.ZR004]
 max_asserts = 6
-
-[tool.zorilla.rules.ZR002]
-enabled = false
 ```
 
 Rule table keys are case-sensitive and uppercase: `[rules.zr004]` is silently

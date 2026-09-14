@@ -23,8 +23,8 @@ holding; the order is roughly cheapest fix first.
    asserts. A loop over cases becomes `@pytest.mark.parametrize`; an `if` over
    environments becomes two tests or a skip marker; a `try`/`except` becomes
    `pytest.raises`.
-5. ZR004 assertion-roulette: give the bare asserts messages, or split the test
-   so each one has a single subject. A failure should name itself.
+5. ZR004 assertion-roulette: the asserts reach for several subjects. Split the
+   test by subject, or give each assert a message; one subject never fires.
 6. ZR006 patch-stack and ZR008 context-patch-stack: too much mocking for one
    test. Extract a seam and build a fake once, or move the setup into a
    fixture.
