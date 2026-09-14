@@ -262,29 +262,22 @@ pub fn has_any_assert(
     .is_break()
 }
 
-/// Count every bare `assert_statement` under `body` and return the first
-/// one in source order, if any.
+/// Every bare `assert_statement` under `body`, in source order.
 ///
 /// Used by ZR004, which cares only about the bare form — not helper
-/// calls and not `with pytest.raises(...)`. Avoids allocating a `Vec`
-/// and avoids constructing a throwaway helpers `HashSet`.
+/// calls and not `with pytest.raises(...)` — and needs the nodes
+/// themselves to decide whether the asserts share one subject. Avoids
+/// constructing a throwaway helpers `HashSet`.
 #[must_use]
-pub fn count_bare_asserts_with_first<'tree>(
-    body: Node<'tree>,
-    source: &str,
-) -> (usize, Option<Node<'tree>>) {
-    let mut count = 0;
-    let mut first: Option<Node<'tree>> = None;
+pub fn collect_bare_asserts<'tree>(body: Node<'tree>, source: &str) -> Vec<Node<'tree>> {
+    let mut out = Vec::new();
     let _ = walk_descendants::<()>(body, |node| {
         if let Some(AssertHit::BareAssert(n)) = classify_assert_hit(node, source, None) {
-            count += 1;
-            if first.is_none() {
-                first = Some(n);
-            }
+            out.push(n);
         }
         ControlFlow::Continue(())
     });
-    (count, first)
+    out
 }
 
 /// Classify a single node as an [`AssertHit`] variant, if it is one.
@@ -335,8 +328,8 @@ fn classify_assert_hit<'tree>(
 ///    `assertion` or `assertively`.
 ///
 /// Both branches are gated on `helpers.is_some()`. Callers that pass
-/// `None` (e.g. ZR004's bare-assert counter via
-/// [`count_bare_asserts_with_first`]) get a hard `false`: they only care
+/// `None` (e.g. ZR004's bare-assert collector via
+/// [`collect_bare_asserts`]) get a hard `false`: they only care
 /// about `assert_statement` nodes, not helper calls, and must remain
 /// unaffected by helper-name heuristics. The gate is what preserves
 /// ZR004's semantics across this extension.

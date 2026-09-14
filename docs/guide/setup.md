@@ -3,9 +3,8 @@
 zorilla is not configured in this repository yet. Run everything below at the
 repository root, in this order.
 
-**1. Install.** Add it as a dev dependency: `uv add --dev zorilla`.
-Alternatives: `pip install zorilla`, or `uvx zorilla check .` for a one-off
-look. Prefer the dev dependency; `uvx` on every run pins no version.
+**1. Install.** `uv add --dev zorilla`, or `pip install zorilla`. Prefer the dev
+dependency over `uvx zorilla check .` on every run: `uvx` pins no version.
 
 **2. Configure.** The defaults already find pytest's idiomatic layouts and skip
 fixture trees. Keep them until you have a clean baseline. Setting either glob
@@ -25,13 +24,16 @@ Leave the per-rule knobs alone until you have numbers: `zorilla guide tune`.
 every finding it reports before wiring zorilla into any gate; run
 `zorilla guide triage` for how. `zorilla overview .` shows which files carry the
 weight, and `zorilla stats .` shows which rules do. Adding a linter to a dirty
-repository's gate gets the linter removed, not the smells.
+repository's gate gets the linter removed, not the smells. To gate before the
+baseline is clear, pipe a `path:start-end,...` manifest of the diff into
+`zorilla check --changed-lines -` (the zorilla repository's
+`contrib/git-changed-lines.sh` writes one): only those lines count, and an
+empty manifest is a clean run.
 
 **4. Integrate.** Add `zorilla check .` to the check aggregator this repository
-already has - poethepoet, `just`, `make`, `nox`: one recipe, one command. It
-runs the full tree and has no diff context. `check` exits 1 on findings, 0
-when clean and 2 when zorilla could not run. `stats` and `overview` always
-exit 0, so gate on `check` and nothing else.
+already has - poethepoet, `just`, `make`, `nox`: one recipe, one command.
+`check` exits 1 on findings, 0 when clean and 2 when it could not run;
+`stats` and `overview` always exit 0, so gate on `check` and nothing else.
 
 For a commit hook, as a madoqua step in `pyproject.toml`:
 
@@ -43,8 +45,7 @@ extend_check = [{ name = "zorilla", cmd = "zorilla check" }]
 madoqua appends the staged Python files, so the step lints exactly those.
 Any path list is valid - `zorilla check tests a.py b.py` lints the directory
 and both files - and named paths bypass `include`, though `exclude` still
-applies. With pre-commit or prek the framework passes the staged files the
-same way:
+applies. pre-commit and prek pass the staged files the same way:
 
 ```yaml
 - repo: https://github.com/mojzis/zorilla
@@ -54,7 +55,6 @@ same way:
 ```
 
 Do not hand-roll a `git diff | zorilla check --files-from -` hook: an empty
-list is indistinguishable from no argument, and zorilla falls back to
-scanning the whole tree.
+list is indistinguishable from no argument and scans the whole tree.
 
 next: run `zorilla check .`
