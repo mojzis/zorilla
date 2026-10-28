@@ -254,7 +254,7 @@ Add zorilla to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/mojzis/zorilla
-    rev: v0.2.3
+    rev: v0.2.4
     hooks:
       - id: zorilla
 ```
