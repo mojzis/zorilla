@@ -6,6 +6,8 @@ pytest codebases. Built to compose with
 and with ruff's `PT` rules — zorilla owns only the gaps those two leave
 behind.
 
+Part of **[aesop](https://mojzis.github.io/aesop/)**, a small menagerie of tools for agentic Python.
+
 > **Status:** v0.1 ready. Ships eight rules (ZR001–ZR008), inline and
 > file-level suppression comments, `text` / `json` / `sarif` output
 > formats, a `list-rules` / `explain` pair, and a pre-commit hook.
