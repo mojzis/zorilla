@@ -49,7 +49,7 @@ applies. pre-commit and prek pass the staged files the same way:
 
 ```yaml
 - repo: https://github.com/mojzis/zorilla
-  rev: v0.2.5
+  rev: v0.2.6
   hooks:
     - id: zorilla
 ```
