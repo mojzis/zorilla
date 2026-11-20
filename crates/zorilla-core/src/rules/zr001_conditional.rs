@@ -110,7 +110,7 @@ impl Rule for ConditionalRule {
     }
 
     fn doc(&self) -> &'static str {
-        include_str!("../../../../docs/rules/ZR001.md")
+        include_str!("../../../../docs/src/rules/ZR001.md")
     }
 
     fn check(&self, ctx: &Context<'_>, out: &mut Vec<Finding>) {

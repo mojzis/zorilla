@@ -96,7 +96,7 @@ impl Rule for NoAssertionRule {
     }
 
     fn doc(&self) -> &'static str {
-        include_str!("../../../../docs/rules/ZR003.md")
+        include_str!("../../../../docs/src/rules/ZR003.md")
     }
 
     fn check(&self, ctx: &Context<'_>, out: &mut Vec<Finding>) {

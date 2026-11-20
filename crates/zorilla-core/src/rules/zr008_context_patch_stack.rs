@@ -99,7 +99,7 @@ impl Rule for ContextPatchStackRule {
     }
 
     fn doc(&self) -> &'static str {
-        include_str!("../../../../docs/rules/ZR008.md")
+        include_str!("../../../../docs/src/rules/ZR008.md")
     }
 
     fn check(&self, ctx: &Context<'_>, out: &mut Vec<Finding>) {

@@ -1,6 +1,6 @@
 //! Agent-facing instructions for the three moments someone meets zorilla.
 //!
-//! The prose lives in `docs/guide/*.md` and is pulled in with [`include_str!`],
+//! The prose lives in `docs/src/guide/*.md` and is pulled in with [`include_str!`],
 //! the same way rule documentation is, so the repository and the CLI serve the
 //! same bytes. There is no guide text in this file, and there must never be: a
 //! second copy is a copy that drifts.
@@ -15,11 +15,11 @@
 use std::path::Path;
 
 /// Instructions for a repository that has no zorilla configuration yet.
-const SETUP: &str = include_str!("../../../docs/guide/setup.md");
+const SETUP: &str = include_str!("../../../docs/src/guide/setup.md");
 /// Instructions for turning a check run's findings into edits.
-const TRIAGE: &str = include_str!("../../../docs/guide/triage.md");
+const TRIAGE: &str = include_str!("../../../docs/src/guide/triage.md");
 /// Reference for suppression, scope and the per-rule knobs.
-const TUNE: &str = include_str!("../../../docs/guide/tune.md");
+const TUNE: &str = include_str!("../../../docs/src/guide/tune.md");
 
 /// Which set of instructions to print.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -61,7 +61,7 @@ fn render_sarif_matches_schema_and_expected_document() {
     //   diverged" message. Overwrite both sides with the build-time
     //   value so the diff stays version-agnostic.
     // - `tool.driver.rules[*].fullDescription.text` contains the full
-    //   embedded `docs/rules/ZR00N.md` body (hundreds of lines across
+    //   embedded `docs/src/rules/ZR00N.md` body (hundreds of lines across
     //   seven rules). The registry-wide catalogue shape is covered by
     //   report.rs unit tests; here we only lock the *shape* (codes +
     //   names) while normalising the markdown bodies to avoid a fragile

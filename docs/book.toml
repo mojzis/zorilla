@@ -1,0 +1,23 @@
+[book]
+title = "zorilla"
+description = "Detects syntactic test smells in pytest codebases"
+authors = ["mojzis"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book/html"
+
+[output.html]
+site-url = "/zorilla/"
+git-repository-url = "https://github.com/mojzis/zorilla"
+edit-url-template = "https://github.com/mojzis/zorilla/edit/main/docs/{path}"
+default-theme = "navy"
+preferred-dark-theme = "navy"
+additional-css = ["custom.css"]
+additional-js = ["mermaid.min.js", "mermaid-init.js", "version.js", "aesop.js"]
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
