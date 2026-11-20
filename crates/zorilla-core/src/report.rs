@@ -287,7 +287,7 @@ struct SarifReportingDescriptor<'a> {
     name: &'a str,
     /// Short summary — SARIF viewers show this inline next to the id.
     short_description: SarifMessage<'a>,
-    /// Long-form markdown (the embedded `docs/rules/ZR00N.md`) — shown
+    /// Long-form markdown (the embedded `docs/src/rules/ZR00N.md`) — shown
     /// on rule hover / in the rule catalogue. Markdown is permitted per
     /// SARIF §3.49.6.
     full_description: SarifMessage<'a>,

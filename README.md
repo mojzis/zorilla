@@ -6,7 +6,7 @@ pytest codebases. Built to compose with
 and with ruff's `PT` rules — zorilla owns only the gaps those two leave
 behind.
 
-Part of **[aesop](https://mojzis.github.io/aesop/)**, a small menagerie of tools for agentic Python.
+📖 **[Documentation](https://mojzis.github.io/zorilla/)** · part of **[aesop](https://mojzis.github.io/aesop/)**, a small menagerie of tools for agentic Python
 
 > **Status:** v0.1 ready. Ships eight rules (ZR001–ZR008), inline and
 > file-level suppression comments, `text` / `json` / `sarif` output
@@ -54,7 +54,7 @@ Exit codes: `0` clean, `1` findings reported, `2` error.
 | ZR008  | context-patch-stack     | Too many `with patch(...)` context managers in one test   |
 
 Long-form docs (motivation, positive/negative examples, config knobs,
-suppression syntax) live under [`docs/rules/`](./docs/rules/). You can
+suppression syntax) live under [`docs/src/rules/`](./docs/src/rules/). You can
 also print them inline with `zorilla explain ZR###` — see below.
 
 ### Worked example
@@ -218,7 +218,7 @@ $ zorilla guide
 | `tune` | suppression syntax, scope globs, per-rule knobs, precedence |
 
 `tune` is a reference and is never auto-selected. The prose lives in
-[`docs/guide/`](./docs/guide/) and is compiled into the binary with
+[`docs/src/guide/`](./docs/src/guide/) and is compiled into the binary with
 `include_str!`, so the files and the CLI serve the same bytes.
 
 Any `check` or `overview` text report that has findings ends with a one-line
@@ -290,7 +290,7 @@ Per-rule sections (`[tool.zorilla.rules.ZRNNN]`) accept `enabled = false`
 to disable the rule and any rule-specific knobs (`max_asserts` for
 ZR004, `max_patches` for ZR006, `extra_helpers` for ZR003,
 `allowed_prefixes` and `extra_pure_callees` for ZR005). See
-[`docs/rules/`](./docs/rules/) for the exhaustive list.
+[`docs/src/rules/`](./docs/src/rules/) for the exhaustive list.
 
 `zorilla guide tune` prints the whole reference — knobs, scope globs,
 suppression syntax and precedence — without leaving the terminal.
@@ -310,6 +310,20 @@ def test_x():
         "https://api.example.com/v1/things", timeout=5, retries=3
     )  # zorilla: ignore[ZR005] -- local double     <- covers the whole call
 ```
+
+## For your CLAUDE.md
+
+<!-- BEGIN SHARED:claude-snippet -->
+```markdown
+### `zorilla` — test-smell gate
+
+- Runs on every commit (pre-commit hook `zorilla check`). Findings are not
+  verdicts: run `zorilla guide triage` for the remedy ladder.
+- Fix the test before suppressing. A legitimate exception gets
+  `# zorilla: ignore[ZR###] -- <reason>` on the line; never a bare ignore.
+- `zorilla explain ZR###` says why a rule fires and which line it reports on.
+```
+<!-- END SHARED:claude-snippet -->
 
 ## Developing
 

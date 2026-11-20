@@ -131,7 +131,7 @@ impl Rule for AssertionRouletteRule {
     }
 
     fn doc(&self) -> &'static str {
-        include_str!("../../../../docs/rules/ZR004.md")
+        include_str!("../../../../docs/src/rules/ZR004.md")
     }
 
     fn check(&self, ctx: &Context<'_>, out: &mut Vec<Finding>) {

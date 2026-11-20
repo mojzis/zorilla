@@ -32,7 +32,7 @@ dependencies = []
 [project.urls]
 homepage = "https://github.com/mojzis/zorilla"
 repository = "https://github.com/mojzis/zorilla"
-documentation = "https://github.com/mojzis/zorilla#readme"
+documentation = "https://mojzis.github.io/zorilla/"
 
 [project.optional-dependencies]
 dev = [

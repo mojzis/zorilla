@@ -28,6 +28,8 @@ workspace = true
 
 [package.metadata.release]
 pre-release-replacements = [
-  { file = "../../docs/guide/setup.md", search = "rev: v[0-9]+\\.[0-9]+\\.[0-9]+", replace = "rev: v{{version}}" },
+  { file = "../../docs/src/guide/setup.md", search = "rev: v[0-9]+\\.[0-9]+\\.[0-9]+", replace = "rev: v{{version}}" },
+  { file = "../../docs/src/index.md", search = "rev: v[0-9]+\\.[0-9]+\\.[0-9]+", replace = "rev: v{{version}}" },
   { file = "../../README.md", search = "rev: v[0-9]+\\.[0-9]+\\.[0-9]+", replace = "rev: v{{version}}" },
+  { file = "../../docs/version.js", search = 'var VERSION = "[^"]*";', replace = 'var VERSION = "{{version}}";', exactly = 1 },
 ]

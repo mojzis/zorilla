@@ -66,7 +66,7 @@ impl Rule for SleepRule {
     }
 
     fn doc(&self) -> &'static str {
-        include_str!("../../../../docs/rules/ZR002.md")
+        include_str!("../../../../docs/src/rules/ZR002.md")
     }
 
     fn check(&self, ctx: &Context<'_>, out: &mut Vec<Finding>) {

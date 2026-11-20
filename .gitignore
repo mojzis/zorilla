@@ -75,3 +75,7 @@ htmlcov/
 
 # Benchmark corpus
 bench/.corpus/
+
+# mdBook build output (docs/book.toml build-dir)
+docs/book/
+docs/node_modules/

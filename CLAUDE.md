@@ -73,3 +73,25 @@ Before marking any task as complete:
 - Tests must assert on values, not just "runs without panic"
 - Flaky tests need root-cause analysis, not looser assertions
 - No new top-level dependencies without updating `[workspace.dependencies]` and surfacing the choice
+
+## Docs
+
+The mdBook site under `docs/` (https://mojzis.github.io/zorilla/) deploys to
+GitHub Pages on push to `main` (`.github/workflows/docs.yml`), along with
+`llms.txt` and `llms-full.txt`. Build locally with `make docs`.
+
+- The guide pages in `docs/src/guide/` are what `zorilla guide` prints, and the
+  rule pages in `docs/src/rules/` are what `zorilla explain` prints
+  (`include_str!` in `zorilla-core`): one source for the CLI and the site.
+- Shared prose lives in `docs/shared/` and is injected into `README.md` and
+  `docs/src/index.md` by `docs/inject-shared.sh`. Edit the shared file, then
+  run the script — never edit between the `<!-- BEGIN SHARED:... -->` markers.
+- `docs/custom.css`, `docs/aesop.js` and `docs/theme/head.hbs` are generated
+  by mojzis/aesop `docs-theme/sync.py`; don't edit them here.
+- `docs/gen-version.sh` syncs the docs version badge with
+  `crates/zorilla-cli/Cargo.toml` (`cargo release` also bumps it, via
+  `[package.metadata.release]` in that manifest).
+- `docs/toolchain.sh` pins the `mdbook` / `mdbook-mermaid` pair used by both
+  `make docs` and the workflow.
+- Adding a page means adding it to `docs/src/SUMMARY.md`; the `llms.txt`
+  generator reads that file. A new rule page needs a line there too.

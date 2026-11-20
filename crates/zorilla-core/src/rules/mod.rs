@@ -54,7 +54,7 @@ pub trait Rule: Sync {
 
     /// Long-form markdown documentation for this rule — the body shown
     /// by `zorilla explain <code>`. Each rule embeds its own
-    /// `docs/rules/ZR00N.md` via `include_str!` so the binary stays
+    /// `docs/src/rules/ZR00N.md` via `include_str!` so the binary stays
     /// self-contained. No default — every rule must opt in so a new
     /// rule cannot ship without documentation.
     fn doc(&self) -> &'static str;
@@ -71,7 +71,7 @@ mod doc_test {
     fn every_rule_has_nonempty_doc_starting_with_its_own_zr_heading() {
         // Tightened from "starts with `# ZR`" to "starts with `# <code>`"
         // so a copy-paste failure (e.g. `zr003_no_assertion.rs` pointing
-        // its `include_str!` at `docs/rules/ZR002.md`) is caught here
+        // its `include_str!` at `docs/src/rules/ZR002.md`) is caught here
         // rather than surfacing as a confusing `explain` output at
         // runtime.
         for rule in all() {
