@@ -78,6 +78,6 @@ Before marking any task as complete:
 
 A change a user would notice adds one file to `release-notes/` in the same PR
 (`YYYY-MM-DD-short-slug.md`, frontmatter `kind: added|changed|fixed|removed`, one or two
-plain sentences). Run `uvx relnotes@latest guide` before writing one: it has the wording rules.
-Dependency bumps, CI, refactors and tests get no note. `uvx relnotes@latest check` validates them.
+plain sentences). Run `uvx --from git+https://github.com/mojzis/relnotes relnotes guide` before writing one: it has the wording rules.
+Dependency bumps, CI, refactors and tests get no note. `uvx --from git+https://github.com/mojzis/relnotes relnotes check` validates them.
 The release workflow turns them into the GitHub release, and the aesop site shows them.
